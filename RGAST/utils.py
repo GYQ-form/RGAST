@@ -4,10 +4,27 @@ import sklearn.neighbors
 import scipy.sparse as sp
 import seaborn as sns
 import matplotlib.pyplot as plt
+from scipy.sparse.csc import csc_matrix
+from scipy.sparse.csr import csr_matrix
 import scanpy as sc
-
 import torch
 from torch_geometric.data import Data
+import contextlib
+import io
+import warnings
+
+def silence_output(func):
+    def wrapper(*args, **kwargs):
+        # 创建一个空的字符串IO对象
+        empty_io = io.StringIO()
+
+        # 使用redirect_stdout和redirect_stderr将输出重定向到空的IO对象
+        with contextlib.redirect_stdout(empty_io), contextlib.redirect_stderr(empty_io):
+            result = func(*args, **kwargs)
+
+        return result
+
+    return wrapper
 
 def refine_spatial_cluster(adata, pred, shape="hexagon"):
     G_df = adata.uns['Spatial_Net'].copy()
@@ -55,7 +72,26 @@ def plot_clustering(adata, colors, title = None, savepath = None):
     if savepath is not None:
         fig.savefig(savepath, bbox_inches='tight')
 
-def Transfer_pytorch_Data(adata):
+def Transfer_pytorch_Data(adata, dim_reduction=None, center_msg='out'):
+    """\
+    Construct graph data for training.
+
+    Parameters
+    ----------
+    adata
+        AnnData object which contains Spatial network and Expression network.
+    dim_reduction
+        Dimensional reduction methods (or the input feature). Can be 'PCA', 
+        'HVG' or None (default using all gene expression, which may cause out of memeory when training).
+    center_msg
+        Message passing mode through the graph. Given a center spot, 
+        'in' denotes that the message is flowing from connected spots to the center spot,
+        'out' denotes that the message is flowing from the center spot to the connected spots.
+
+    Returns
+    -------
+    The spatial networks are saved in adata.uns['Spatial_Net']
+    """
     #Expression edge
     G_df = adata.uns['Exp_Net'].copy()
     cells = np.array(adata.obs_names)
@@ -76,10 +112,30 @@ def Transfer_pytorch_Data(adata):
     G = G + sp.eye(G.shape[0])
     spatial_edge = np.nonzero(G)
     
-    data = Data(edge_index=torch.LongTensor(np.array(
-        [np.concatenate((exp_edge[0],spatial_edge[0])),
-         np.concatenate((exp_edge[1],spatial_edge[1]))])).contiguous(), 
-         x=torch.FloatTensor(adata.obsm['X_pca'].copy()))  # .todense()
+    if dim_reduction=='PCA':
+        feat = adata.obsm['X_pca']
+    elif dim_reduction=='HVG':
+        adata_Vars = adata[:, adata.var['highly_variable']]
+        if isinstance(adata_Vars.X, csc_matrix) or isinstance(adata_Vars.X, csr_matrix):
+            feat = adata_Vars.X.toarray()
+        else:
+            feat = adata_Vars.X
+    else:
+        if isinstance(adata.X, csc_matrix) or isinstance(adata.X, csr_matrix):
+            feat = adata.X.toarray()
+        else:
+            feat = adata.X
+
+    if center_msg=='out':
+        data = Data(edge_index=torch.LongTensor(np.array(
+            [np.concatenate((exp_edge[0],spatial_edge[0])),
+            np.concatenate((exp_edge[1],spatial_edge[1]))])).contiguous(), 
+            x=torch.FloatTensor(feat.copy()))  # .todense()
+    else:
+        data = Data(edge_index=torch.LongTensor(np.array(
+            [np.concatenate((exp_edge[1],spatial_edge[1])),
+            np.concatenate((exp_edge[0],spatial_edge[0]))])).contiguous(), 
+            x=torch.FloatTensor(feat.copy()))
     edge_type = torch.zeros(exp_edge[0].shape[0]+spatial_edge[0].shape[0],dtype=torch.int64)
     edge_type[exp_edge[0].shape[0]:] = 1
     data.edge_type = edge_type
@@ -160,15 +216,40 @@ def Cal_Spatial_Net(adata, rad_cutoff=None, k_cutoff=6, model='KNN', verbose=Tru
     Spatial_Net['Cell1'] = Spatial_Net['Cell1'].map(id_cell_trans)
     Spatial_Net['Cell2'] = Spatial_Net['Cell2'].map(id_cell_trans)
     if verbose:
-        print('The graph contains %d edges, %d cells.' %(Spatial_Net.shape[0], adata.n_obs))
+        print('Spatial graph contains %d edges, %d cells.' %(Spatial_Net.shape[0], adata.n_obs))
         print('%.4f neighbors per cell on average.' %(Spatial_Net.shape[0]/adata.n_obs))
 
     adata.uns['Spatial_Net'] = Spatial_Net
 
-def Cal_Expression_Net(adata, k_cutoff=6):
+def Cal_Expression_Net(adata, k_cutoff=6, dim_reduce=None, verbose=True):
 
-    coor = pd.DataFrame(adata.obsm['X_pca'])
-    coor.index = adata.obs.index
+    if verbose:
+        print('------Calculating Expression simalarity graph...')
+
+    if dim_reduce=='PCA':
+        coor = pd.DataFrame(adata.obsm['X_pca'])
+        coor.index = adata.obs.index
+    elif dim_reduce=='HVG':
+        adata_Vars = adata[:, adata.var['highly_variable']]
+        if isinstance(adata_Vars.X, csc_matrix) or isinstance(adata_Vars.X, csr_matrix):
+            feat = adata_Vars.X.toarray()
+        else:
+            feat = adata_Vars.X
+        coor = pd.DataFrame(feat)
+        coor.index = adata.obs.index
+        coor.columns = adata.var_names[adata.var['highly_variable']]
+        adata.obsm['HVG'] = coor
+    else:
+        warnings.warn("No dimentional reduction method specified, using all genes' expression to calculate expression similarity network.")
+        if isinstance(adata.X, csc_matrix) or isinstance(adata.X, csr_matrix):
+            feat = adata.X.toarray()
+        else:
+            feat = adata.X
+        coor = pd.DataFrame(feat)
+        coor.index = adata.obs.index
+        coor.columns = adata.var_names
+
+        
     nbrs = sklearn.neighbors.NearestNeighbors(n_neighbors=k_cutoff+1).fit(coor)
     distances, indices = nbrs.kneighbors(coor)
     KNN_list = []
@@ -184,8 +265,12 @@ def Cal_Expression_Net(adata, k_cutoff=6):
     exp_Net['Cell1'] = exp_Net['Cell1'].map(id_cell_trans)
     exp_Net['Cell2'] = exp_Net['Cell2'].map(id_cell_trans)
 
-    adata.uns['Exp_Net'] = exp_Net
+    if verbose:
+        print('Expression graph contains %d edges, %d cells.' %(exp_Net.shape[0], adata.n_obs))
+        print('%.4f neighbors per cell on average.' %(exp_Net.shape[0]/adata.n_obs))
 
+    adata.uns['Exp_Net'] = exp_Net
+    
 
 def res_search_fixed_clus(adata, fixed_clus_count, increment=0.02):
     '''
@@ -313,3 +398,32 @@ def Stats_Spatial_Net(adata):
     plt.xlabel('')
     plt.title('Number of Neighbors (Mean=%.2f)'%Mean_edge)
     ax.bar(plot_df.index, plot_df)
+
+
+@silence_output
+def mclust_R(adata, num_cluster, modelNames='EEE', used_obsm=None, random_seed=2020):
+    """\
+    Clustering using the mclust algorithm.
+    The parameters are the same as those in the R package mclust.
+    """
+    
+    np.random.seed(random_seed)
+    import rpy2.robjects as robjects
+    robjects.r.library("mclust")
+
+    import rpy2.robjects.numpy2ri
+    rpy2.robjects.numpy2ri.activate()
+    r_random_seed = robjects.r['set.seed']
+    r_random_seed(random_seed)
+    rmclust = robjects.r['Mclust']
+
+    if used_obsm is None:
+        res = rmclust(rpy2.robjects.numpy2ri.numpy2rpy(np.array(adata.X)), num_cluster, modelNames)
+    else:
+        res = rmclust(rpy2.robjects.numpy2ri.numpy2rpy(adata.obsm[used_obsm]), num_cluster, modelNames)
+    mclust_res = np.array(res[-2])
+
+    adata.obs['mclust'] = mclust_res
+    adata.obs['mclust'] = adata.obs['mclust'].astype('int')
+    adata.obs['mclust'] = adata.obs['mclust'].astype('category')
+       
