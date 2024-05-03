@@ -1,6 +1,0 @@
-torch
-scanpy
-scikit-learn
-torch_geometric
-scipy
-numba
