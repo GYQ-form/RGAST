@@ -143,22 +143,28 @@ def Transfer_pytorch_Data(adata, dim_reduction=None, center_msg='out'):
     return data
 
 def Batch_Data(adata, num_batch_x, num_batch_y, spatial_key=['X', 'Y'], plot_Stats=False):
-    Sp_df = adata.obs.loc[:, spatial_key].copy()
-    Sp_df = np.array(Sp_df)
-    batch_x_coor = [np.percentile(Sp_df[:, 0], (1/num_batch_x)*x*100) for x in range(num_batch_x+1)]
-    batch_y_coor = [np.percentile(Sp_df[:, 1], (1/num_batch_y)*x*100) for x in range(num_batch_y+1)]
+    # 提取所需的空间坐标数据并转换为 numpy 数组
+    Sp_df = adata.obs.loc[:, spatial_key].values
+
+    # 计算分批的坐标范围
+    batch_x_coor = np.percentile(Sp_df[:, 0], np.linspace(0, 100, num_batch_x + 1))
+    batch_y_coor = np.percentile(Sp_df[:, 1], np.linspace(0, 100, num_batch_y + 1))
 
     Batch_list = []
     for it_x in range(num_batch_x):
+        min_x, max_x = batch_x_coor[it_x], batch_x_coor[it_x + 1]
         for it_y in range(num_batch_y):
-            min_x = batch_x_coor[it_x]
-            max_x = batch_x_coor[it_x+1]
-            min_y = batch_y_coor[it_y]
-            max_y = batch_y_coor[it_y+1]
-            temp_adata = adata.copy()
-            temp_adata = temp_adata[temp_adata.obs[spatial_key[0]].map(lambda x: min_x <= x <= max_x)]
-            temp_adata = temp_adata[temp_adata.obs[spatial_key[1]].map(lambda y: min_y <= y <= max_y)]
+            min_y, max_y = batch_y_coor[it_y], batch_y_coor[it_y + 1]
+
+            # 使用布尔索引进行空间坐标过滤
+            mask_x = (Sp_df[:, 0] >= min_x) & (Sp_df[:, 0] <= max_x)
+            mask_y = (Sp_df[:, 1] >= min_y) & (Sp_df[:, 1] <= max_y)
+            mask = mask_x & mask_y
+
+            # 生成子集并添加到列表中
+            temp_adata = adata[mask].copy()
             Batch_list.append(temp_adata)
+            
     if plot_Stats:
         f, ax = plt.subplots(figsize=(1, 3))
         plot_df = pd.DataFrame([x.shape[0] for x in Batch_list], columns=['#spot/batch'])

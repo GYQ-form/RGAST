@@ -135,17 +135,8 @@ class Train_RGAST:
             warnings.warn("No dimentional reduction method specified, using all genes' expression as input.")
 
         self.dim_reduction = dim_reduction
-        
         self.batch_data = batch_data
         self.adata = adata
-        if 'Spatial_Net' not in adata.uns.keys():
-            raise ValueError("Spatial_Net is not existed! Run Cal_Spatial_Net first!")
-        if 'Exp_Net' not in adata.uns.keys():
-            raise ValueError("Exp_Net is not existed! Run Cal_Expression_Net first!")
-        self.data = Transfer_pytorch_Data(adata, dim_reduction=dim_reduction,center_msg=center_msg)
-
-        if verbose:
-            print('Size of Input: ', self.data.x.shape)
 
         if batch_data:
             self.num_batch_x, self.num_batch_y = num_batch_x_y
@@ -155,9 +146,20 @@ class Train_RGAST:
                                     spatial_key=['X', 'Y'])
             for temp_adata in Batch_list:
                 Cal_Spatial_Net(temp_adata, **spatial_net_arg)
-                Cal_Expression_Net(temp_adata, **exp_net_arg)
+                Cal_Expression_Net(temp_adata, dim_reduce=dim_reduction, **exp_net_arg)
             data_list = [Transfer_pytorch_Data(adata, dim_reduction=dim_reduction,center_msg=center_msg) for adata in Batch_list]
             self.loader = DataLoader(data_list, batch_size=1, shuffle=True)
+
+        else:
+            if 'Spatial_Net' not in adata.uns.keys():
+                raise ValueError("Spatial_Net is not existed! Run Cal_Spatial_Net first!")
+            if 'Exp_Net' not in adata.uns.keys():
+                raise ValueError("Exp_Net is not existed! Run Cal_Expression_Net first!")
+            self.data = Transfer_pytorch_Data(adata, dim_reduction=dim_reduction,center_msg=center_msg)
+
+            if verbose:
+                print('Size of Input: ', self.data.x.shape)
+
 
         self.device = torch.device(f'cuda:{device_idx}' if torch.cuda.is_available() else 'cpu')
         self.model = None
