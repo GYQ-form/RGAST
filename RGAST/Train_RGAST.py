@@ -148,10 +148,7 @@ class Train_RGAST:
 
         if batch_data:
             self.num_batch_x, self.num_batch_y = num_batch_x_y
-            adata.obs['X'] = adata.obsm['spatial'][:,0]
-            adata.obs['Y'] = adata.obsm['spatial'][:,1]
-            Batch_list = Batch_Data(adata, num_batch_x=self.num_batch_x, num_batch_y=self.num_batch_y, 
-                                    spatial_key=['X', 'Y'])
+            Batch_list = Batch_Data(adata, num_batch_x=self.num_batch_x, num_batch_y=self.num_batch_y)
             for temp_adata in Batch_list:
                 Cal_Spatial_Net(temp_adata, **spatial_net_arg)
                 Cal_Expression_Net(temp_adata, dim_reduce=dim_reduction, **exp_net_arg)

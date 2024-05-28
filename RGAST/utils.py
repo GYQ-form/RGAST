@@ -26,35 +26,38 @@ def silence_output(func):
 
     return wrapper
 
-def refine_spatial_cluster(adata, pred, shape="hexagon"):
+def refine_spatial_cluster(adata, pred, num_nbs=8):
+    # 获取空间网络
     G_df = adata.uns['Spatial_Net'].copy()
+    # 创建单元格名称到索引的映射
     cells = np.array(adata.obs_names)
     cells_id_tran = dict(zip(cells, range(cells.shape[0])))
+    # 将单元格名称映射到索引
     G_df['Cell1'] = G_df['Cell1'].map(cells_id_tran)
     G_df['Cell2'] = G_df['Cell2'].map(cells_id_tran)
+    # 创建稀疏矩阵
     G = sp.coo_matrix((G_df['Distance'], (G_df['Cell1'], G_df['Cell2'])), shape=(adata.n_obs, adata.n_obs))
-    refined_pred=[]
-    pred=pd.DataFrame({"pred": pred})
-    pred.reset_index(inplace=True)
-    dis_df=pd.DataFrame(G.todense())
-    if shape=="hexagon":
-        num_nbs=6 
-    elif shape=="square":
-        num_nbs=4
-    else:
-        print("Shape not recongized, shape='hexagon' for Visium data, 'square' for ST data.")
-    for i in range(pred.shape[0]):
-        dis_tmp=dis_df.iloc[i, :]
-        dis_tmp = dis_tmp[dis_tmp>0]
-        dis_tmp = dis_tmp.sort_values(ascending=True)
-        nbs=dis_tmp[0:num_nbs]
-        nbs_pred=pred.pred.iloc[nbs.index]
-        self_pred=pred.pred.iloc[i]
-        v_c=nbs_pred.value_counts()
-        if (v_c.loc[self_pred]<num_nbs/2) and (np.max(v_c)>num_nbs/2):
-            refined_pred.append(v_c.idxmax())
-        else:           
-            refined_pred.append(self_pred)
+    # 转换为CSR格式以提高访问效率
+    G = G.tocsr()
+    pred = np.array(pred)
+    refined_pred = pred.copy()
+    for i in range(adata.n_obs):
+        # 获取当前单元格的邻居及其距离
+        neighbors = G[i].nonzero()[1]  # 获取非零元素的列索引
+        if len(neighbors) == 0:
+            continue
+        distances = G[i, neighbors].toarray().flatten()
+        # 排序并选择最近的邻居
+        sorted_idx = np.argsort(distances)
+        nearest_neighbors = neighbors[sorted_idx][:num_nbs]
+        # 获取邻居的预测值
+        nbs_pred = pred[nearest_neighbors]
+        self_pred = pred[i]
+        # 统计邻居中的预测值
+        v_c = pd.Series(nbs_pred).value_counts()
+        # 决定是否修改当前单元格的预测值
+        if (v_c.get(self_pred, 0) < num_nbs / 2) and (v_c.max() > num_nbs / 2):
+            refined_pred[i] = v_c.idxmax()
     return refined_pred
 
 def plot_clustering(adata, colors, title = None, savepath = None):
@@ -142,9 +145,9 @@ def Transfer_pytorch_Data(adata, dim_reduction=None, center_msg='out'):
         
     return data
 
-def Batch_Data(adata, num_batch_x, num_batch_y, spatial_key=['X', 'Y'], plot_Stats=False):
+def Batch_Data(adata, num_batch_x, num_batch_y, plot_Stats=False):
     # 提取所需的空间坐标数据并转换为 numpy 数组
-    Sp_df = adata.obs.loc[:, spatial_key].values
+    Sp_df = adata.obsm['spatial']
 
     # 计算分批的坐标范围
     batch_x_coor = np.percentile(Sp_df[:, 0], np.linspace(0, 100, num_batch_x + 1))
@@ -163,7 +166,8 @@ def Batch_Data(adata, num_batch_x, num_batch_y, spatial_key=['X', 'Y'], plot_Sta
 
             # 生成子集并添加到列表中
             temp_adata = adata[mask].copy()
-            Batch_list.append(temp_adata)
+            if temp_adata.shape[0] > 10:
+                Batch_list.append(temp_adata)
             
     if plot_Stats:
         f, ax = plt.subplots(figsize=(1, 3))
@@ -255,8 +259,8 @@ def Cal_Expression_Net(adata, k_cutoff=6, dim_reduce=None, verbose=True):
         coor.index = adata.obs.index
         coor.columns = adata.var_names
 
-        
-    nbrs = sklearn.neighbors.NearestNeighbors(n_neighbors=k_cutoff+1).fit(coor)
+    n_nbrs = k_cutoff+1 if k_cutoff+1<coor.shape[0] else coor.shape[0]
+    nbrs = sklearn.neighbors.NearestNeighbors(n_neighbors=n_nbrs).fit(coor)
     distances, indices = nbrs.kneighbors(coor)
     KNN_list = []
     for it in range(indices.shape[0]):
@@ -277,6 +281,25 @@ def Cal_Expression_Net(adata, k_cutoff=6, dim_reduce=None, verbose=True):
 
     adata.uns['Exp_Net'] = exp_Net
     
+
+def cal_metagene(adata,gene_list,obs_name='metagene',layer=None):
+
+    # 提取感兴趣基因的表达矩阵
+    if layer is not None:
+        gene_expressions = adata[:, gene_list].layers[layer]
+    else:
+        gene_expressions = adata[:, gene_list].X
+
+    # 如果是稀疏矩阵，则转换为密集矩阵
+    if sp.issparse(gene_expressions):
+        gene_expressions = gene_expressions.toarray()
+
+    # 计算给定基因列表的表达值之和
+    metagene_expression = np.sum(gene_expressions, axis=1)
+
+    # 将新的 metagene 添加到 anndata 对象中
+    adata.obs[obs_name] = metagene_expression
+
 
 def res_search_fixed_clus(adata, fixed_clus_count, increment=0.02):
     '''
