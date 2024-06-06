@@ -301,18 +301,91 @@ def cal_metagene(adata,gene_list,obs_name='metagene',layer=None):
     adata.obs[obs_name] = metagene_expression
 
 
-def res_search_fixed_clus(adata, fixed_clus_count, increment=0.02):
-    '''
-        arg1(adata)[AnnData matrix]
-        arg2(fixed_clus_count)[int]
+def simulate_ST(sc_adata, spatial_df, sc_type_col='ann_level_3', sp_type_col='domain', disperse_sp_type='0', disperse_frac=0.3):
+    """
+    Simulate spatial transcriptomics data from single-cell RNA-seq data.
+    
+    Parameters:
+    - sc_adata: AnnData object containing single-cell RNA-seq data.
+    - spatial_df: DataFrame containing spatial coordinates and cell type labels.
+    
+    Returns:
+    - AnnData object with spatial transcriptomics data. Spatial coordinates are in obsm['spatial'] and cell types are in obs.
+    """
+    
+    # Get unique cell types from single-cell data
+    unique_sc_types = sc_adata.obs[sc_type_col].unique()
+    
+    # Get unique cell types from spatial data
+    unique_spatial_types = spatial_df[sp_type_col].unique()
+    
+    # Randomly select cell types for each spatial type
+    selected_types = np.random.choice(unique_sc_types, len(unique_spatial_types), replace=False)
+    
+    # Create a mapping from spatial types to selected single-cell types
+    type_mapping = dict(zip(unique_spatial_types, selected_types))
+    
+    # Initialize a list to collect the simulated cell indices
+    simulated_indices = []
+    spatial_coords = []
+    
+    # Iterate over each cell type in the spatial data
+    for spatial_type, count in spatial_df[sp_type_col].value_counts().items():
+        # Get the corresponding single-cell type
+        sc_type = type_mapping[spatial_type]
+        print(f'sptial type:{spatial_type}, sc type:{sc_type}')
         
-        return:
-            resolution[int]
-    '''
-    for res in np.arange(2.5, 0.0, -increment):
-        sc.tl.leiden(adata, random_state=0, resolution=res)
-        count_unique_leiden = len(pd.DataFrame(adata.obs['leiden']).leiden.unique())
-        if count_unique_leiden <= fixed_clus_count:
+        # Get all cells of this type from the single-cell data
+        sc_cells_of_type_indices = np.where(sc_adata.obs[sc_type_col] == sc_type)[0]
+        
+        if len(sc_cells_of_type_indices) >= count:
+            # If we have enough cells, randomly select 'count' cells
+            selected_indices = np.random.choice(sc_cells_of_type_indices, count, replace=False)
+        else:
+            # If not enough cells, randomly assign the available cells to the spatial positions
+            selected_indices = np.random.choice(sc_cells_of_type_indices, count, replace=True)
+
+        if spatial_type == disperse_sp_type:
+            start_idx=len(simulated_indices)
+            end_idx=start_idx+len(selected_indices)
+            disperse_indices = np.arange(start_idx,end_idx)
+
+        # Collect the selected cell indices
+        simulated_indices.extend(selected_indices)
+        
+        # Collect the corresponding spatial coordinates
+        spatial_coords.append(spatial_df[spatial_df[sp_type_col] == spatial_type][['x', 'y']].values)
+
+    # Randomly select a cell type to simulate the dispersed cells
+    remaining_types = list(set(unique_sc_types) - set(selected_types))
+    if remaining_types:
+        dispersed_type = np.random.choice(remaining_types)
+        print(f'disperse cell type:{dispersed_type}')
+        dispersed_cells_indices = np.where(sc_adata.obs[sc_type_col] == dispersed_type)[0]
+        dispersed_sample_size = round(disperse_indices.shape[0] * disperse_frac)
+        dispersed_cells_indices = np.random.choice(dispersed_cells_indices, dispersed_sample_size)
+        
+        # Replace some cells in the simulated_adata with dispersed cells
+        replace_indices = np.random.choice(disperse_indices, dispersed_sample_size, replace=False)
+        simulated_indices_array = np.array(simulated_indices)
+        simulated_indices_array[replace_indices] = dispersed_cells_indices
+
+    # Concatenate all selected cells to form the simulated spatial data
+    simulated_adata = sc_adata[simulated_indices_array].copy()
+    simulated_adata.obs_names_make_unique()
+
+    # Set the spatial coordinates
+    simulated_adata.obsm['spatial'] = np.vstack(spatial_coords)
+    simulated_adata.obs[sc_type_col] = simulated_adata.obs[sc_type_col].astype('str')
+    simulated_adata.obs[sc_type_col].iloc[replace_indices] = dispersed_type
+    
+    return simulated_adata
+
+def res_search_fixed_clus(adata, fixed_clus_count, max_res=2.5, min_res=0.01, increment=0.02, key_added='HERGAST'):
+    for res in np.arange(max_res, min_res, -increment):
+        sc.tl.leiden(adata, random_state=2024, resolution=res,key_added=key_added)
+        count_unique_leiden = len(adata.obs[key_added].unique())
+        if count_unique_leiden <= fixed_clus_count*1.5:
             break
     return res
 
