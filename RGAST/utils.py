@@ -301,7 +301,7 @@ def cal_metagene(adata,gene_list,obs_name='metagene',layer=None):
     adata.obs[obs_name] = metagene_expression
 
 
-def simulate_ST(sc_adata, spatial_df, sc_type_col='ann_level_3', sp_type_col='domain', disperse_sp_type='0', disperse_frac=0.3):
+def simulate_ST(sc_adata, spatial_df, sc_type_col='ann_level_3', sp_type_col='domain', disperse_frac=0.3):
     """
     Simulate spatial transcriptomics data from single-cell RNA-seq data.
     
@@ -345,11 +345,6 @@ def simulate_ST(sc_adata, spatial_df, sc_type_col='ann_level_3', sp_type_col='do
             # If not enough cells, randomly assign the available cells to the spatial positions
             selected_indices = np.random.choice(sc_cells_of_type_indices, count, replace=True)
 
-        if spatial_type == disperse_sp_type:
-            start_idx=len(simulated_indices)
-            end_idx=start_idx+len(selected_indices)
-            disperse_indices = np.arange(start_idx,end_idx)
-
         # Collect the selected cell indices
         simulated_indices.extend(selected_indices)
         
@@ -362,11 +357,14 @@ def simulate_ST(sc_adata, spatial_df, sc_type_col='ann_level_3', sp_type_col='do
         dispersed_type = np.random.choice(remaining_types)
         print(f'disperse cell type:{dispersed_type}')
         dispersed_cells_indices = np.where(sc_adata.obs[sc_type_col] == dispersed_type)[0]
-        dispersed_sample_size = round(disperse_indices.shape[0] * disperse_frac)
-        dispersed_cells_indices = np.random.choice(dispersed_cells_indices, dispersed_sample_size)
+        dispersed_sample_size = round(spatial_df.shape[0] * disperse_frac)
+        if dispersed_cells_indices.shape[0] >= dispersed_sample_size:
+            dispersed_cells_indices = np.random.choice(dispersed_cells_indices, dispersed_sample_size, replace=False)
+        else:
+            dispersed_cells_indices = np.random.choice(dispersed_cells_indices, dispersed_sample_size, replace=True)
         
         # Replace some cells in the simulated_adata with dispersed cells
-        replace_indices = np.random.choice(disperse_indices, dispersed_sample_size, replace=False)
+        replace_indices = np.random.choice(len(simulated_indices), dispersed_sample_size, replace=False)
         simulated_indices_array = np.array(simulated_indices)
         simulated_indices_array[replace_indices] = dispersed_cells_indices
 
