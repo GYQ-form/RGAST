@@ -2,7 +2,7 @@
 
 RGAST: Relational Graph Attention Network for Spatial Transcriptome Analysis
 
-This document will help you easily go through the scBC model.
+This document will help you easily go through the RGAST model.
 
 ![fig1_00](https://github.com/GYQ-form/RGAST/assets/79566479/fe0655dc-2318-44e0-92bf-0aea3aad7163)
 
