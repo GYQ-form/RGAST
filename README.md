@@ -1,6 +1,6 @@
 # RGAST
 
-RGAST: Relational Graph Attention Network for Spatial Transcriptome Analysis
+RGAST: Relational Graph Attention Network for Spatial Transcriptome Analysis [paper](https://doi.org/10.1101/2024.08.09.607420)
 
 This document will help you easily go through the RGAST model.
 
