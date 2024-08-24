@@ -6,7 +6,6 @@ This document will help you easily go through the RGAST model.
 
 ![fig1_00](https://github.com/GYQ-form/RGAST/assets/79566479/fe0655dc-2318-44e0-92bf-0aea3aad7163)
 
-
 ## Installation
 
 To install our package, run
@@ -15,7 +14,13 @@ To install our package, run
 pip install RGAST
 ```
 
+You can also clone the repo and install it in editable mode:
 
+```bash
+git clone https://github.com/GYQ-form/RGAST.git
+cd RGAST
+pip install -e .
+```
 
 ## Usage
 
@@ -26,8 +31,6 @@ RGAST (Relational Graph Attention network for Spatial Transcriptome analysis) co
 - spatially variable gene (SVG) detection
 - uncover spatially resolved cell-cell interactions
 - reveal intricate 3D spatial patterns across multiple sections of ST data
-
-
 
 ## Tutorial
 
