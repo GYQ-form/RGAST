@@ -18,7 +18,7 @@ setup(
     install_requires=[
         'torch',
         'scanpy',
-        'sklearn',
+        'scikit-learn',
         'torch_geometric',
         'scipy',
         'numba',
