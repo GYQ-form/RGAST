@@ -379,7 +379,7 @@ def simulate_ST(sc_adata, spatial_df, sc_type_col='ann_level_3', sp_type_col='do
     
     return simulated_adata
 
-def res_search_fixed_clus(adata, fixed_clus_count, max_res=2.5, min_res=0.01, increment=0.02, key_added='HERGAST'):
+def res_search_fixed_clus(adata, fixed_clus_count, max_res=2.5, min_res=0, increment=0.02, key_added='HERGAST'):
     for res in np.arange(max_res, min_res, -increment):
         sc.tl.leiden(adata, random_state=2024, resolution=res,key_added=key_added)
         count_unique_leiden = len(adata.obs[key_added].unique())
