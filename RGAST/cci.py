@@ -3,20 +3,34 @@ import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
 from scipy.spatial.distance import pdist, squareform
-from matplotlib.collections import LineCollection
+from matplotlib.patches import FancyArrowPatch
 
 def attention_to_interact(attention, n_spots, cum_att_threshold=0.5):
     interact_mat = np.zeros((n_spots,n_spots))
+    weighted_mat = np.zeros((n_spots,n_spots))
+
     for i in np.arange(n_spots):
         idx = np.where(attention[0][1]==i)[0]
         from_idx = attention[0][0,idx]
         att_score = attention[1][np.where(attention[0][1]==i)].reshape(-1)
+        
+        #dereplication
+        unique_labels, indices = np.unique(from_idx, return_inverse=True)
+        summed_values = np.zeros_like(unique_labels, dtype=np.float32)
+        for j in range(len(att_score)):
+            summed_values[indices[j]] += att_score[j]
+        from_idx = unique_labels
+        att_score = summed_values
+
         sorted_indices = np.argsort(att_score)[::-1]
         cumulative_sum = np.cumsum(att_score[sorted_indices])
         stop_index = np.where(cumulative_sum > cum_att_threshold)[0][0]
         used_from_idx = from_idx[sorted_indices[:stop_index+1]]
+        used_att = att_score[sorted_indices[:stop_index+1]]
         interact_mat[i,used_from_idx] = interact_mat[used_from_idx,i] = 1
-    return interact_mat
+        weighted_mat[used_from_idx,i] = used_att
+
+    return interact_mat, weighted_mat
 
 def ranked_partial(coord, size):  #size是list，[3,5]代表把总图切成宽3份(x)、高5份(y)的子图
     x_gap = (coord[:,0].max()-coord[:,0].min())/size[0]
@@ -47,25 +61,32 @@ def select_celltypes(cell_types, selected_ct, frac):
     return selected_idx
 
 def plot_cell_adj(coord, cell_type, adj, filename=None, cmap=None, cell_size=25):
+    coord_r = coord.copy()
+    coord_r[:,1] = -coord_r[:,1]
     # Create a figure and axis
     fig, ax = plt.subplots()
 
     # Set the axis limits
-    ax.set_xlim(min(coord[:, 0]) - 1, max(coord[:, 0]) + 1)
-    ax.set_ylim(min(coord[:, 1]) - 1, max(coord[:, 1]) + 1)
+    ax.set_xlim(min(coord_r[:, 0]) - 10, max(coord_r[:, 0]) + 10)
+    ax.set_ylim(min(coord_r[:, 1]) - 10, max(coord_r[:, 1]) + 10)
 
     # Plot cells
-    sns.scatterplot(x=coord[:, 0], y=coord[:, 1], hue=cell_type, palette=cmap, edgecolor=None, ax=ax, s=cell_size)
+    sns.scatterplot(x=coord_r[:, 0], y=coord_r[:, 1], hue=cell_type, palette=cmap, edgecolor=None, ax=ax, s=cell_size)
 
-    # Plot cell connections
-    lines = []
+    # Plot cell connections with varying linewidths
     for i in range(len(adj)):
-        for j in range(i + 1, len(adj)):
-            if adj[i, j] == 1:
-                lines.append([coord[i], coord[j]])
-
-    line_collection = LineCollection(lines, linewidths=1, colors='black', alpha=0.5)
-    ax.add_collection(line_collection)
+        for j in range(len(adj)):
+            if adj[i, j] > 0:  # Check if there is a connection
+                line_width = adj[i, j]  # Use adj value for line width
+                arrow = FancyArrowPatch((coord_r[i, 0], coord_r[i, 1]),
+                                        (coord_r[j, 0], coord_r[j, 1]),
+                                        color='black',
+                                        linewidth=line_width,
+                                        arrowstyle='->',  # Use a simple arrow style
+                                        mutation_scale=10,  # Scale of the arrowhead
+                                        alpha=0.5,
+                                        facecolor='none')  # Make the arrowhead empty
+                ax.add_patch(arrow)
 
     # # Create legend
     # legend_labels = np.unique(cell_type)
@@ -76,11 +97,10 @@ def plot_cell_adj(coord, cell_type, adj, filename=None, cmap=None, cell_size=25)
     ax.axis('off')
 
     # Save the plot to a file
-    if filename is None:
-        plt.show()
-    else:
+    if filename is not None:
         plt.savefig(filename, bbox_inches='tight')
-        
+    
+    plt.show()
     plt.close()
 
 

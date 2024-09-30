@@ -26,13 +26,13 @@ def silence_output(func):
 
     return wrapper
 
-def refine_spatial_cluster(adata, pred, num_nbs=8):
+def refine_spatial_cluster(adata, pred):
     # 获取空间网络
     G_df = adata.uns['Spatial_Net'].copy()
-    # 创建单元格名称到索引的映射
+    # 创建cell名称到索引的映射
     cells = np.array(adata.obs_names)
     cells_id_tran = dict(zip(cells, range(cells.shape[0])))
-    # 将单元格名称映射到索引
+    # 将cell名称映射到索引
     G_df['Cell1'] = G_df['Cell1'].map(cells_id_tran)
     G_df['Cell2'] = G_df['Cell2'].map(cells_id_tran)
     # 创建稀疏矩阵
@@ -42,9 +42,10 @@ def refine_spatial_cluster(adata, pred, num_nbs=8):
     pred = np.array(pred)
     refined_pred = pred.copy()
     for i in range(adata.n_obs):
-        # 获取当前单元格的邻居及其距离
+        # 获取当前cell的邻居及其距离
         neighbors = G[i].nonzero()[1]  # 获取非零元素的列索引
-        if len(neighbors) == 0:
+        num_nbs = len(neighbors)
+        if num_nbs == 0:
             continue
         distances = G[i, neighbors].toarray().flatten()
         # 排序并选择最近的邻居
@@ -55,8 +56,8 @@ def refine_spatial_cluster(adata, pred, num_nbs=8):
         self_pred = pred[i]
         # 统计邻居中的预测值
         v_c = pd.Series(nbs_pred).value_counts()
-        # 决定是否修改当前单元格的预测值
-        if (v_c.get(self_pred, 0) < num_nbs / 2) and (v_c.max() > num_nbs / 2):
+        # 决定是否修改当前cell的预测值
+        if (v_c.get(self_pred, 0) < num_nbs / 2) and (v_c.max() >= num_nbs / 2):
             refined_pred[i] = v_c.idxmax()
     return refined_pred
 
