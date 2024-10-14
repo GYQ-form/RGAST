@@ -12,9 +12,9 @@ class RGAST(torch.nn.Module):
         super(RGAST, self).__init__()
         [in_dim, num_hidden, out_dim] = hidden_dims
         self.conv1 = RGATConv(in_dim, num_hidden, num_relations=2, heads=1, concat=False,
-                              dropout=0.3, add_self_loops=False, bias=False)
+                              dropout=0.3, bias=False)
         self.conv2 = RGATConv(num_hidden, out_dim, num_relations=2, heads=1, concat=False,
-                              dropout=0.3, add_self_loops=False, bias=False)
+                              dropout=0.3, bias=False)
         self.decoder = nn.Sequential(
             nn.Linear(out_dim, in_dim),
         )                  
