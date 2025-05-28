@@ -1,6 +1,6 @@
 # RGAST
 
-RGAST: Relational Graph Attention Network for Spatial Transcriptome Analysis [[paper]](https://doi.org/10.1101/2024.08.09.607420)
+RGAST: A Relational Graph Attention Network for Multi-Scale Cell-Cell Communication Inference from Spatial Transcriptomics [[paper]](https://doi.org/10.1101/2024.08.09.607420)
 
 This document will help you easily go through the RGAST model.
 
@@ -41,4 +41,4 @@ RGAST is a deep learning framework designed to infer multi-scale cell-cell commu
 
 ## Tutorial
 
-We have prepared several basic tutorials  in https://github.com/GYQ-form/RGAST/tree/main/tutorial. You can quickly hands on RGAST by going through these tutorials. Model parameters trained in our study are also released in https://github.com/GYQ-form/RGAST/tree/main/model_path.
+We have prepared several basic tutorials  in https://github.com/GYQ-form/RGAST/tree/main/tutorial. You can quickly hands on RGAST by going through these tutorials. 
