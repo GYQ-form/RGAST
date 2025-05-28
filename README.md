@@ -6,12 +6,28 @@ This document will help you easily go through the RGAST model.
 
 ![fig1_00](https://github.com/GYQ-form/RGAST/assets/79566479/fe0655dc-2318-44e0-92bf-0aea3aad7163)
 
+## Dependencies
+
+The required Python packages and versions tested in our study are:
+
+```
+pytorch==2.4.1
+scanpy==1.10.3
+scikit-learn==1.5.2
+pyg==2.6.1
+scipy==1.14.1
+numpy==2.0.1
+pandas==2.2.3
+```
+
 ## Installation
 
 To install our package, run
 
 ```bash
-pip install RGAST
+git clone https://github.com/GYQ-form/RGAST.git
+cd RGAST
+pip install .
 ```
 
 You can also clone the repo and install it in editable mode:
@@ -24,12 +40,11 @@ pip install -e .
 
 ## Usage
 
-RGAST (Relational Graph Attention network for Spatial Transcriptome analysis) constructs a relational graph attention network to learn the representation of each spot in the spatial transcriptome data. Plus the attention mechanism, RGAST considers both gene expression similarity and spatial neighbor relationships in constructing the graph network, enabling a more comprehensive and flexible representation of the spatial transcriptome data. RGAST can be used in many ST analysis:
+RGAST is a deep learning framework designed to infer multi-scale cell-cell communication (CCC) networks de novo from spatial transcriptomics (ST) data. RGAST integrates spatial proximity and transcriptional profiles using a relational graph attention mechanism. This approach allows RGAST to dynamically learn context-specific signaling patterns and reconstruct CCC networks without prior knowledge of ligand-receptor pairs, effectively capturing both local and global communication patterns. Besides, RGAST is also a versatile tool for many downstream ST analysis:
 
 - spatial domain identification
-- cell trajectory inference
 - spatially variable gene (SVG) detection
-- uncover spatially resolved cell-cell interactions
+- cell trajectory inference
 - reveal intricate 3D spatial patterns across multiple sections of ST data
 
 ## Tutorial

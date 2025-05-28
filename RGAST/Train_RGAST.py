@@ -4,25 +4,25 @@ import scanpy as sc
 import anndata
 from sklearn.metrics.cluster import adjusted_rand_score
 from sklearn.metrics import silhouette_score
+import random
 from tqdm import tqdm
-
+import warnings
 from .RGAST import RGAST
-from .utils import Transfer_pytorch_Data, res_search_fixed_clus, Batch_Data, Cal_Spatial_Net, Cal_Expression_Net
+from .utils import Transfer_pytorch_Data, res_search_fixed_clus, Batch_Data, Cal_Spatial_Net, Cal_Expression_Net, mclust_R
 
 import torch
 import torch.backends.cudnn as cudnn
-cudnn.deterministic = True
 cudnn.benchmark = True
 import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
-
+    
 def target_distribution(batch):
     weight = (batch ** 2) / torch.sum(batch, 0)
     return (weight.t() / torch.sum(weight, 1)).t()
 
 class Train_RGAST:
 
-    def __init__(self, adata, batch_data = False, num_batch_x_y = None, spatial_net_arg = {}, exp_net_arg = {}, verbose=True):
+    def __init__(self, adata, dim_reduction = None, batch_data = False, num_batch_x_y = None, device_idx = 7, spatial_net_arg = {}, exp_net_arg = {}, verbose=True, center_msg='out'):
 
         """\
         Initialization of a RGAST trainer.
@@ -40,39 +40,44 @@ class Train_RGAST:
             A dict passing key-word arguments to calculating expression network in each batch data. See `Cal_Expression_Net`
         """
 
-        if 'X_pca' not in adata.obsm.keys():
-            raise ValueError("PCA has not been done! Run sc.pp.pca first!")
-        if verbose:
-            print('Size of Input: ', adata.obsm['X_pca'].shape)
-        
+        if dim_reduction == 'PCA':
+            if 'X_pca' not in adata.obsm.keys():
+                raise ValueError("PCA has not been done! Run sc.pp.pca first!")
+        elif dim_reduction == 'HVG':
+            if 'highly_variable' not in adata.var.keys():
+                raise ValueError("HVG has not been computed! Run sc.pp.highly_variable_genes first!")
+        else:
+            warnings.warn("No dimentional reduction method specified, using all genes' expression as input.")
+
+        self.dim_reduction = dim_reduction
         self.batch_data = batch_data
         self.adata = adata
+
         if 'Spatial_Net' not in adata.uns.keys():
             raise ValueError("Spatial_Net is not existed! Run Cal_Spatial_Net first!")
         if 'Exp_Net' not in adata.uns.keys():
             raise ValueError("Exp_Net is not existed! Run Cal_Expression_Net first!")
-        self.data = Transfer_pytorch_Data(adata)
+        self.data = Transfer_pytorch_Data(adata, dim_reduction=dim_reduction,center_msg=center_msg)
+        if verbose:
+            print('Size of Input: ', self.data.x.shape)
 
         if batch_data:
             self.num_batch_x, self.num_batch_y = num_batch_x_y
-            adata.obs['X'] = adata.obsm['spatial'][:,0]
-            adata.obs['Y'] = adata.obsm['spatial'][:,1]
-            Batch_list = Batch_Data(adata, num_batch_x=self.num_batch_x, num_batch_y=self.num_batch_y, 
-                                    spatial_key=['X', 'Y'])
+            Batch_list = Batch_Data(adata, num_batch_x=self.num_batch_x, num_batch_y=self.num_batch_y)
             for temp_adata in Batch_list:
                 Cal_Spatial_Net(temp_adata, **spatial_net_arg)
-                Cal_Expression_Net(temp_adata, **exp_net_arg)
-            data_list = [Transfer_pytorch_Data(adata) for adata in Batch_list]
+                Cal_Expression_Net(temp_adata, dim_reduce=dim_reduction, **exp_net_arg)
+            data_list = [Transfer_pytorch_Data(adata, dim_reduction=dim_reduction,center_msg=center_msg) for adata in Batch_list]
             self.loader = DataLoader(data_list, batch_size=1, shuffle=True)
 
-        self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device(f'cuda:{device_idx}' if torch.cuda.is_available() else 'cpu')
         self.model = None
 
 
-    def train_RGAST(self, early_stopping = True, label_key = None, save_path = '.', n_clusters = 7,
-                    hidden_dims=[100, 32], n_epochs=1000, lr=0.001, key_added='RGAST',
-                    gradient_clipping=5., weight_decay=0.0001, verbose=True, 
-                    random_seed=0, save_loss=False, save_reconstrction=False):
+    def train_RGAST(self, early_stopping = True, label_key = None, save_path = '.', n_clusters = 7, cluster_method = 'leiden',
+                    hidden_dims=[100, 32], n_epochs=1000, lr=0.001, key_added='RGAST', att_drop = 0.3,
+                    gradient_clipping=5., weight_decay=0.0001, min_epochs=300, random_seed=0, save_loss=False,
+                    save_reconstrction=False, save_attention=True):
 
         """\
         Training graph attention auto-encoder.
@@ -88,7 +93,7 @@ class Train_RGAST:
         n_clusters
             number of clusters to set when calculating early stopping criterion.
         hidden_dims
-            The dimension of the encoder.
+            The dimension of the encoder (depends on RGAST or RGAST2).
         n_epochs
             Number of total epochs in training.
         lr
@@ -102,9 +107,7 @@ class Train_RGAST:
         save_loss
             If True, the training loss is saved in adata.uns['RGAST_loss'].
         save_reconstrction
-            If True, the reconstructed expression profiles are saved in adata.layers['RGAST_ReX'].
-        device
-            See torch.device.
+            If True, the reconstructed PCA profiles are saved in adata.layers['RGAST_ReX'].
 
         Returns
         -------
@@ -116,14 +119,14 @@ class Train_RGAST:
 
         # seed_everything()
         seed=random_seed
-        import random
         random.seed(seed)
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
         np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+
 
         if self.model is None:
-            model = RGAST(hidden_dims = [self.data.x.shape[1]] + hidden_dims).to(self.device)
+            model = RGAST(hidden_dims = [self.data.x.shape[1]] + hidden_dims, dim_reduce=self.dim_reduction, att_drop=att_drop).to(self.device)
         else:
             model = self.model.to(self.device)
             
@@ -134,112 +137,117 @@ class Train_RGAST:
         loss_list = []
         score_list = [0]
         num_fail = 0
-        for epoch in tqdm(range(1, n_epochs+1)):
 
-            if early_stopping:
-
-                if label_key is not None:
-                    if epoch % 50 == 0:
-                        if self.batch_data:
-                            model.to('cpu')
-                            model.eval()
-                            z, _ = model(data.x.cpu(), data.edge_index.cpu(), data.edge_type.cpu())
-                            model.to(self.device)
+        with tqdm(range(n_epochs)) as tq:
+            for epoch in tq:
+                if early_stopping:
+                    with torch.no_grad():
+                        if label_key is not None:
+                            if (epoch+1) % 50 == 0:
+                                if self.batch_data:
+                                    model.to('cpu')
+                                    model.eval()
+                                    z, _, _, _ = model(data.x.cpu(), data.edge_index.cpu(), data.edge_type.cpu())
+                                    model.to(self.device)
+                                else:
+                                    model.eval()
+                                    z, _, _, _ = model(data.x, data.edge_index, data.edge_type)
+                                z = z.to('cpu').detach().numpy()
+                                adata_RGAST = anndata.AnnData(z)
+                                adata_RGAST.obs_names=self.adata.obs_names
+                                if cluster_method == 'mclust':
+                                    mclust_R(adata_RGAST, n_clusters)
+                                elif cluster_method == 'leiden':
+                                    sc.pp.neighbors(adata_RGAST)
+                                    _ = res_search_fixed_clus(adata_RGAST, n_clusters)
+                                obs_df = adata_RGAST.obs.join(self.adata.obs[label_key]).dropna(subset=label_key)
+                                ARI = adjusted_rand_score(obs_df['RGAST'], obs_df[label_key])
+                                if ARI <= max(score_list):
+                                    num_fail += 1
+                                    if num_fail>3 and epoch>=min_epochs:
+                                        break
+                                else:
+                                    num_fail = 0
+                                    torch.save(model,f'{save_path}/model.pth')
+                                    self.adata.obs['RGAST'] = adata_RGAST.obs['RGAST']
+                                score_list.append(ARI)
+                                tq.set_postfix(ARI=round(max(score_list),3))
+                        
                         else:
-                            model.eval()
-                            z, _ = model(data.x, data.edge_index, data.edge_type)
-                        z = z.to('cpu').detach().numpy()
-                        adata_RGAST = anndata.AnnData(z)
-                        adata_RGAST.obs_names=self.adata.obs_names
-                        sc.pp.neighbors(adata_RGAST)
-                        sc.tl.umap(adata_RGAST)
-                        _ = res_search_fixed_clus(adata_RGAST, n_clusters)
-                        obs_df = adata_RGAST.obs.join(self.adata.obs[label_key]).dropna(subset=label_key)
-                        ARI = adjusted_rand_score(obs_df['leiden'], obs_df[label_key])
-                        if verbose:
-                            print(f'epoch:{epoch},ARI:{ARI}')
-                        if ARI <= max(score_list):
-                            num_fail += 1
-                            if num_fail>3 and epoch>=300:
-                                break
-                        else:
-                            num_fail = 0
-                            torch.save(model,f'{save_path}/model.pth')
-                            self.adata.obs['leiden'] = adata_RGAST.obs['leiden']
-                        score_list.append(ARI)
+                            if (epoch+1) % 50 == 0:
+                                if self.batch_data:
+                                    model.to('cpu')
+                                    model.eval()
+                                    z, _, _, _ = model(data.x.cpu(), data.edge_index.cpu(), data.edge_type.cpu())
+                                    model.to(self.device)
+                                else:
+                                    model.eval()
+                                    z, _, _, _ = model(data.x, data.edge_index, data.edge_type)
+                                z = z.to('cpu').detach().numpy()
+                                adata_RGAST = anndata.AnnData(z)
+                                adata_RGAST.obs_names=self.adata.obs_names
+                                sc.pp.neighbors(adata_RGAST)
+                                _ = res_search_fixed_clus(adata_RGAST, n_clusters)
+                                SC = silhouette_score(z, adata_RGAST.obs['RGAST'])
+                                if SC <= max(score_list):
+                                    num_fail += 1
+                                    if num_fail>3 and epoch>=min_epochs:
+                                        break
+                                else:
+                                    num_fail = 0
+                                    torch.save(model,f'{save_path}/model.pth')
+                                    self.adata.obs['RGAST'] = adata_RGAST.obs['RGAST']
+                                score_list.append(SC)
+                                tq.set_postfix(SC=round(max(score_list),3))
                 
+                if self.batch_data:
+                    for batch in self.loader:
+                        batch = batch.to(self.device)
+                        model.train()
+                        optimizer.zero_grad()
+                        z, out, _, _ = model(batch.x, batch.edge_index, batch.edge_type)
+                        loss = F.mse_loss(batch.x, out) #F.nll_loss(out[data.train_mask], data.y[data.train_mask])
+                        loss.backward()
+                        loss_list.append(loss.item())
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clipping)
+                        optimizer.step()
+
                 else:
-                    if epoch % 50 == 0:
-                        if self.batch_data:
-                            model.to('cpu')
-                            model.eval()
-                            z, _ = model(data.x.cpu(), data.edge_index.cpu(), data.edge_type.cpu())
-                            model.to(self.device)
-                        else:
-                            model.eval()
-                            z, _ = model(data.x, data.edge_index, data.edge_type)
-                        z = z.to('cpu').detach().numpy()
-                        adata_RGAST = anndata.AnnData(z)
-                        adata_RGAST.obs_names=self.adata.obs_names
-                        sc.pp.neighbors(adata_RGAST)
-                        sc.tl.umap(adata_RGAST)
-                        _ = res_search_fixed_clus(adata_RGAST, n_clusters)
-                        SC = silhouette_score(z, adata_RGAST.obs['leiden'])
-                        if verbose:
-                            print(f'epoch:{epoch},SC:{SC}')
-                        if SC <= max(score_list):
-                            num_fail += 1
-                            if num_fail>3 and epoch>=300:
-                                break
-                        else:
-                            num_fail = 0
-                            torch.save(model,f'{save_path}/model.pth')
-                            self.adata.obs['leiden'] = adata_RGAST.obs['leiden']
-                        score_list.append(SC)
-            
-            if self.batch_data:
-                for batch in self.loader:
-                    batch = batch.to(self.device)
                     model.train()
                     optimizer.zero_grad()
-                    z, out = model(batch.x, batch.edge_index, batch.edge_type)
-                    loss = F.mse_loss(batch.x, out) #F.nll_loss(out[data.train_mask], data.y[data.train_mask])
-                    loss_list.append(loss)
+                    z, out, _, _ = model(data.x, data.edge_index, data.edge_type)
+                    loss = F.mse_loss(data.x, out) #F.nll_loss(out[data.train_mask], data.y[data.train_mask])
                     loss.backward()
+                    loss_list.append(loss.item())
                     torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clipping)
                     optimizer.step()
-
-            else:
-                model.train()
-                optimizer.zero_grad()
-                z, out = model(data.x, data.edge_index, data.edge_type)
-                loss = F.mse_loss(data.x, out) #F.nll_loss(out[data.train_mask], data.y[data.train_mask])
-                loss_list.append(loss)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clipping)
-                optimizer.step()
         
-        if os.path.exists(f'{save_path}/model.pth'):
+        if early_stopping == True and os.path.exists(f'{save_path}/model.pth'):
             model = torch.load(f'{save_path}/model.pth').to(self.device)
 
-        if self.batch_data:
-            model.to('cpu')
-            model.eval()
-            z, out = model(data.x.cpu(), data.edge_index.cpu(), data.edge_type.cpu())
-            model.to(self.device)
-        else:
-            model.eval()
-            z, out = model(data.x, data.edge_index, data.edge_type)
+        with torch.no_grad():
+            if self.batch_data:
+                model.to('cpu')
+                model.eval()
+                z, out, att1, att2 = model(data.x.cpu(), data.edge_index.cpu(), data.edge_type.cpu())
+                model.to(self.device)
+            else:
+                model.eval()
+                z, out, att1, att2 = model(data.x, data.edge_index, data.edge_type)
 
         RGAST_rep = z.to('cpu').detach().numpy()
         np.save(f'{save_path}/RGAST_embedding.npy', RGAST_rep)
+        torch.save(model.to('cpu'),f'{save_path}/model.pth')
         self.adata.obsm[key_added] = RGAST_rep
 
         if save_loss:
-            self.adata.uns['RGAST_loss'] = loss
+            self.adata.uns['RGAST_loss'] = loss_list
         if save_reconstrction:
-            ReX = out.to('cpu').detach().numpy()
-            self.adata.layers['RGAST_ReX'] = ReX
+            ReX = out.to('cpu').numpy()
+            self.adata.obsm['RGAST_ReX'] = ReX
+        if save_attention:
+            self.adata.uns['att1'] = (att1[0].to('cpu').numpy(),att1[1].to('cpu').numpy())
+            self.adata.uns['att2'] = (att2[0].to('cpu').numpy(),att2[1].to('cpu').numpy())
 
         self.model = model
 
@@ -272,7 +280,7 @@ class Train_RGAST:
         model = self.model.to(self.device)
         model.eval()
         test_z = self.adata.obsm['RGAST']
-        y_pred_last = np.array(self.adata.obs['leiden'],dtype=np.int32).copy()
+        y_pred_last = np.array(self.adata.obs['RGAST'],dtype=np.int32).copy()
         counts = len(np.bincount(y_pred_last))
         cluster_layer = []
         for i in range(counts):
@@ -284,56 +292,54 @@ class Train_RGAST:
 
         score_list = [0]
         num_fail = 0
-        for epoch_id in tqdm(range(num_epochs)):
 
-            if early_stopping:
+        with tqdm(range(num_epochs)) as tq:
+            for epoch_id in tq:
 
-                if epoch_id % dec_interval == 0:
-                    #early stopping
-                    if self.label_key is not None:
-                        model.eval()
-                        z, _ = model(data.x, data.edge_index, data.edge_type)
-                        z = z.to('cpu').detach().numpy()
-                        adata_RGAST = anndata.AnnData(z)
-                        adata_RGAST.obs_names=self.adata.obs_names
-                        sc.pp.neighbors(adata_RGAST)
-                        sc.tl.umap(adata_RGAST)
-                        _ = res_search_fixed_clus(adata_RGAST, self.n_clusters)
-                        obs_df = adata_RGAST.obs.join(self.adata.obs[self.label_key]).dropna(subset=self.label_key)
-                        ARI = adjusted_rand_score(obs_df['leiden'], obs_df[self.label_key])
-                        if verbose:
-                            print(f'epoch:{epoch_id},ARI:{ARI}')
-                        if ARI <= max(score_list):
-                            num_fail += 1
-                            if num_fail>3 and epoch_id>=300:
-                                break
+                if (epoch_id+1) % dec_interval == 0:
+
+                    if early_stopping:
+                        #early stopping
+                        if self.label_key is not None:
+                            model.eval()
+                            z, _ = model(data.x, data.edge_index, data.edge_type)
+                            z = z.to('cpu').detach().numpy()
+                            adata_RGAST = anndata.AnnData(z)
+                            adata_RGAST.obs_names=self.adata.obs_names
+                            sc.pp.neighbors(adata_RGAST)
+                            _ = res_search_fixed_clus(adata_RGAST, self.n_clusters)
+                            obs_df = adata_RGAST.obs.join(self.adata.obs[self.label_key]).dropna(subset=self.label_key)
+                            ARI = adjusted_rand_score(obs_df['RGAST'], obs_df[self.label_key])
+                            if ARI <= max(score_list):
+                                num_fail += 1
+                                if num_fail>3 and epoch_id>=300:
+                                    break
+                            else:
+                                num_fail = 0
+                                torch.save(model,f'{self.save_path}/model.pth')
+                                self.adata.obs['RGAST'] = adata_RGAST.obs['RGAST']
+                            score_list.append(ARI)
+                            tq.set_postfix(ARI=round(max(score_list),3))
+
                         else:
-                            num_fail = 0
-                            torch.save(model,f'{self.save_path}/model.pth')
-                            self.adata.obs['leiden'] = adata_RGAST.obs['leiden']
-                        score_list.append(ARI)
-
-                    else:
-                        model.eval()
-                        z, _ = model(data.x, data.edge_index, data.edge_type)
-                        z = z.to('cpu').detach().numpy()
-                        adata_RGAST = anndata.AnnData(z)
-                        adata_RGAST.obs_names=self.adata.obs_names
-                        sc.pp.neighbors(adata_RGAST)
-                        sc.tl.umap(adata_RGAST)
-                        _ = res_search_fixed_clus(adata_RGAST, self.n_clusters)
-                        SC = silhouette_score(z, adata_RGAST.obs['leiden'])
-                        if verbose:
-                            print(f'epoch:{epoch_id},SC:{SC}')
-                        if SC <= max(score_list):
-                            num_fail += 1
-                            if num_fail>3 and epoch_id>=300:
-                                break
-                        else:
-                            num_fail = 0
-                            torch.save(model,f'{self.save_path}/model.pth')
-                            self.adata.obs['leiden'] = adata_RGAST.obs['leiden']
-                        score_list.append(SC)
+                            model.eval()
+                            z, _ = model(data.x, data.edge_index, data.edge_type)
+                            z = z.to('cpu').detach().numpy()
+                            adata_RGAST = anndata.AnnData(z)
+                            adata_RGAST.obs_names=self.adata.obs_names
+                            sc.pp.neighbors(adata_RGAST)
+                            _ = res_search_fixed_clus(adata_RGAST, self.n_clusters)
+                            SC = silhouette_score(z, adata_RGAST.obs['RGAST'])
+                            if SC <= max(score_list):
+                                num_fail += 1
+                                if num_fail>3 and epoch_id>=300:
+                                    break
+                            else:
+                                num_fail = 0
+                                torch.save(model,f'{self.save_path}/model.pth')
+                                self.adata.obs['RGAST'] = adata_RGAST.obs['RGAST']
+                            score_list.append(SC)
+                            tq.set_postfix(SC=round(max(score_list),3))
 
                     #DEC update
                     z, reconst = model(data.x, data.edge_index, data.edge_type)
@@ -347,20 +353,20 @@ class Train_RGAST:
                         print('delta_label {:.4}'.format(delta_label), '< tol', dec_tol)
                         print('Reached tolerance threshold. Stopping training.')
                         break
-                
+                    
 
-            # training model
-            model.train()
-            optimizer.zero_grad()
-            z, reconst = model(data.x, data.edge_index, data.edge_type)
-            q = 1.0 / (1.0 + torch.sum(torch.pow(z.unsqueeze(1) - cluster_layer, 2), 2) / 1.0)
-            q = (q.t() / torch.sum(q, 1)).t()
-            loss_rec = F.mse_loss(data.x, reconst)
-            # clustering KL loss
-            loss_kl = F.kl_div(q.log(), torch.tensor(tmp_p).to(self.device)).to(self.device)
-            loss = loss_kl + loss_rec
-            loss.backward()
-            optimizer.step()
+                # training model
+                model.train()
+                optimizer.zero_grad()
+                z, reconst = model(data.x, data.edge_index, data.edge_type)
+                q = 1.0 / (1.0 + torch.sum(torch.pow(z.unsqueeze(1) - cluster_layer, 2), 2) / 1.0)
+                q = (q.t() / torch.sum(q, 1)).t()
+                loss_rec = F.mse_loss(data.x, reconst)
+                # clustering KL loss
+                loss_kl = F.kl_div(q.log(), torch.tensor(tmp_p).to(self.device)).to(self.device)
+                loss = loss_kl + loss_rec
+                loss.backward()
+                optimizer.step()
 
         model = torch.load(f'{self.save_path}/model.pth').to(self.device)
         model.eval()
@@ -372,11 +378,12 @@ class Train_RGAST:
         self.model = model
 
     def load_model(self, path):
-        self.model = torch.load(path)
+        self.model = torch.load(path, map_location=self.device)
 
     def save_model(self, path):
         torch.save(self.model,f'{path}/model.pth')
 
+    @torch.no_grad()
     def process(self, gdata = None):
         if gdata is None:
             gdata = self.data

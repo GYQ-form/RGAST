@@ -4,40 +4,61 @@ import sklearn.neighbors
 import scipy.sparse as sp
 import seaborn as sns
 import matplotlib.pyplot as plt
+from scipy.sparse.csc import csc_matrix
+from scipy.sparse.csr import csr_matrix
 import scanpy as sc
-
 import torch
 from torch_geometric.data import Data
+import contextlib
+import io
+import warnings
 
-def refine_spatial_cluster(adata, pred, shape="hexagon"):
+def silence_output(func):
+    def wrapper(*args, **kwargs):
+        # 创建一个空的字符串IO对象
+        empty_io = io.StringIO()
+
+        # 使用redirect_stdout和redirect_stderr将输出重定向到空的IO对象
+        with contextlib.redirect_stdout(empty_io), contextlib.redirect_stderr(empty_io):
+            result = func(*args, **kwargs)
+
+        return result
+
+    return wrapper
+
+def refine_spatial_cluster(adata, pred):
+    # 获取空间网络
     G_df = adata.uns['Spatial_Net'].copy()
+    # 创建cell名称到索引的映射
     cells = np.array(adata.obs_names)
     cells_id_tran = dict(zip(cells, range(cells.shape[0])))
+    # 将cell名称映射到索引
     G_df['Cell1'] = G_df['Cell1'].map(cells_id_tran)
     G_df['Cell2'] = G_df['Cell2'].map(cells_id_tran)
+    # 创建稀疏矩阵
     G = sp.coo_matrix((G_df['Distance'], (G_df['Cell1'], G_df['Cell2'])), shape=(adata.n_obs, adata.n_obs))
-    refined_pred=[]
-    pred=pd.DataFrame({"pred": pred})
-    pred.reset_index(inplace=True)
-    dis_df=pd.DataFrame(G.todense())
-    if shape=="hexagon":
-        num_nbs=6 
-    elif shape=="square":
-        num_nbs=4
-    else:
-        print("Shape not recongized, shape='hexagon' for Visium data, 'square' for ST data.")
-    for i in range(pred.shape[0]):
-        dis_tmp=dis_df.iloc[i, :]
-        dis_tmp = dis_tmp[dis_tmp>0]
-        dis_tmp = dis_tmp.sort_values(ascending=True)
-        nbs=dis_tmp[0:num_nbs]
-        nbs_pred=pred.pred.iloc[nbs.index]
-        self_pred=pred.pred.iloc[i]
-        v_c=nbs_pred.value_counts()
-        if (v_c.loc[self_pred]<num_nbs/2) and (np.max(v_c)>num_nbs/2):
-            refined_pred.append(v_c.idxmax())
-        else:           
-            refined_pred.append(self_pred)
+    # 转换为CSR格式以提高访问效率
+    G = G.tocsr()
+    pred = np.array(pred)
+    refined_pred = pred.copy()
+    for i in range(adata.n_obs):
+        # 获取当前cell的邻居及其距离
+        neighbors = G[i].nonzero()[1]  # 获取非零元素的列索引
+        num_nbs = len(neighbors)
+        if num_nbs == 0:
+            continue
+        distances = G[i, neighbors].toarray().flatten()
+        # 排序并选择最近的邻居
+        sorted_idx = np.argsort(distances)
+        nearest_neighbors = neighbors[sorted_idx][:num_nbs]
+        # 获取邻居的预测值
+        nbs_pred = pred[nearest_neighbors]
+        self_pred = pred[i]
+        # 统计邻居中的预测值
+        v_c = pd.Series(nbs_pred).value_counts()
+        # 决定是否修改当前cell的预测值
+        if (v_c.get(self_pred, 0) < num_nbs / 2) and (v_c.max() >= num_nbs / 2):
+            refined_pred[i] = v_c.idxmax()
     return refined_pred
 
 def plot_clustering(adata, colors, title = None, savepath = None):
@@ -55,7 +76,26 @@ def plot_clustering(adata, colors, title = None, savepath = None):
     if savepath is not None:
         fig.savefig(savepath, bbox_inches='tight')
 
-def Transfer_pytorch_Data(adata):
+def Transfer_pytorch_Data(adata, dim_reduction=None, center_msg='out'):
+    """\
+    Construct graph data for training.
+
+    Parameters
+    ----------
+    adata
+        AnnData object which contains Spatial network and Expression network.
+    dim_reduction
+        Dimensional reduction methods (or the input feature). Can be 'PCA', 
+        'HVG' or None (default using all gene expression, which may cause out of memeory when training).
+    center_msg
+        Message passing mode through the graph. Given a center spot, 
+        'in' denotes that the message is flowing from connected spots to the center spot,
+        'out' denotes that the message is flowing from the center spot to the connected spots.
+
+    Returns
+    -------
+    The spatial networks are saved in adata.uns['Spatial_Net']
+    """
     #Expression edge
     G_df = adata.uns['Exp_Net'].copy()
     cells = np.array(adata.obs_names)
@@ -76,33 +116,60 @@ def Transfer_pytorch_Data(adata):
     G = G + sp.eye(G.shape[0])
     spatial_edge = np.nonzero(G)
     
-    data = Data(edge_index=torch.LongTensor(np.array(
-        [np.concatenate((exp_edge[0],spatial_edge[0])),
-         np.concatenate((exp_edge[1],spatial_edge[1]))])).contiguous(), 
-         x=torch.FloatTensor(adata.obsm['X_pca'].copy()))  # .todense()
+    if dim_reduction=='PCA':
+        feat = adata.obsm['X_pca']
+    elif dim_reduction=='HVG':
+        adata_Vars = adata[:, adata.var['highly_variable']]
+        if isinstance(adata_Vars.X, csc_matrix) or isinstance(adata_Vars.X, csr_matrix):
+            feat = adata_Vars.X.toarray()
+        else:
+            feat = adata_Vars.X
+    else:
+        if isinstance(adata.X, csc_matrix) or isinstance(adata.X, csr_matrix):
+            feat = adata.X.toarray()
+        else:
+            feat = adata.X
+
+    if center_msg=='out':
+        data = Data(edge_index=torch.LongTensor(np.array(
+            [np.concatenate((exp_edge[0],spatial_edge[0])),
+            np.concatenate((exp_edge[1],spatial_edge[1]))])).contiguous(), 
+            x=torch.FloatTensor(feat.copy()))  # .todense()
+    else:
+        data = Data(edge_index=torch.LongTensor(np.array(
+            [np.concatenate((exp_edge[1],spatial_edge[1])),
+            np.concatenate((exp_edge[0],spatial_edge[0]))])).contiguous(), 
+            x=torch.FloatTensor(feat.copy()))
     edge_type = torch.zeros(exp_edge[0].shape[0]+spatial_edge[0].shape[0],dtype=torch.int64)
     edge_type[exp_edge[0].shape[0]:] = 1
     data.edge_type = edge_type
         
     return data
 
-def Batch_Data(adata, num_batch_x, num_batch_y, spatial_key=['X', 'Y'], plot_Stats=False):
-    Sp_df = adata.obs.loc[:, spatial_key].copy()
-    Sp_df = np.array(Sp_df)
-    batch_x_coor = [np.percentile(Sp_df[:, 0], (1/num_batch_x)*x*100) for x in range(num_batch_x+1)]
-    batch_y_coor = [np.percentile(Sp_df[:, 1], (1/num_batch_y)*x*100) for x in range(num_batch_y+1)]
+def Batch_Data(adata, num_batch_x, num_batch_y, plot_Stats=False):
+    # 提取所需的空间坐标数据并转换为 numpy 数组
+    Sp_df = adata.obsm['spatial']
+
+    # 计算分批的坐标范围
+    batch_x_coor = np.percentile(Sp_df[:, 0], np.linspace(0, 100, num_batch_x + 1))
+    batch_y_coor = np.percentile(Sp_df[:, 1], np.linspace(0, 100, num_batch_y + 1))
 
     Batch_list = []
     for it_x in range(num_batch_x):
+        min_x, max_x = batch_x_coor[it_x], batch_x_coor[it_x + 1]
         for it_y in range(num_batch_y):
-            min_x = batch_x_coor[it_x]
-            max_x = batch_x_coor[it_x+1]
-            min_y = batch_y_coor[it_y]
-            max_y = batch_y_coor[it_y+1]
-            temp_adata = adata.copy()
-            temp_adata = temp_adata[temp_adata.obs[spatial_key[0]].map(lambda x: min_x <= x <= max_x)]
-            temp_adata = temp_adata[temp_adata.obs[spatial_key[1]].map(lambda y: min_y <= y <= max_y)]
-            Batch_list.append(temp_adata)
+            min_y, max_y = batch_y_coor[it_y], batch_y_coor[it_y + 1]
+
+            # 使用布尔索引进行空间坐标过滤
+            mask_x = (Sp_df[:, 0] >= min_x) & (Sp_df[:, 0] <= max_x)
+            mask_y = (Sp_df[:, 1] >= min_y) & (Sp_df[:, 1] <= max_y)
+            mask = mask_x & mask_y
+
+            # 生成子集并添加到列表中
+            temp_adata = adata[mask].copy()
+            if temp_adata.shape[0] > 10:
+                Batch_list.append(temp_adata)
+            
     if plot_Stats:
         f, ax = plt.subplots(figsize=(1, 3))
         plot_df = pd.DataFrame([x.shape[0] for x in Batch_list], columns=['#spot/batch'])
@@ -160,16 +227,41 @@ def Cal_Spatial_Net(adata, rad_cutoff=None, k_cutoff=6, model='KNN', verbose=Tru
     Spatial_Net['Cell1'] = Spatial_Net['Cell1'].map(id_cell_trans)
     Spatial_Net['Cell2'] = Spatial_Net['Cell2'].map(id_cell_trans)
     if verbose:
-        print('The graph contains %d edges, %d cells.' %(Spatial_Net.shape[0], adata.n_obs))
+        print('Spatial graph contains %d edges, %d cells.' %(Spatial_Net.shape[0], adata.n_obs))
         print('%.4f neighbors per cell on average.' %(Spatial_Net.shape[0]/adata.n_obs))
 
     adata.uns['Spatial_Net'] = Spatial_Net
 
-def Cal_Expression_Net(adata, k_cutoff=6):
+def Cal_Expression_Net(adata, k_cutoff=6, dim_reduce=None, verbose=True):
 
-    coor = pd.DataFrame(adata.obsm['X_pca'])
-    coor.index = adata.obs.index
-    nbrs = sklearn.neighbors.NearestNeighbors(n_neighbors=k_cutoff+1).fit(coor)
+    if verbose:
+        print('------Calculating Expression simalarity graph...')
+
+    if dim_reduce=='PCA':
+        coor = pd.DataFrame(adata.obsm['X_pca'])
+        coor.index = adata.obs.index
+    elif dim_reduce=='HVG':
+        adata_Vars = adata[:, adata.var['highly_variable']]
+        if isinstance(adata_Vars.X, csc_matrix) or isinstance(adata_Vars.X, csr_matrix):
+            feat = adata_Vars.X.toarray()
+        else:
+            feat = adata_Vars.X
+        coor = pd.DataFrame(feat)
+        coor.index = adata.obs.index
+        coor.columns = adata.var_names[adata.var['highly_variable']]
+        adata.obsm['HVG'] = coor
+    else:
+        warnings.warn("No dimentional reduction method specified, using all genes' expression to calculate expression similarity network.")
+        if isinstance(adata.X, csc_matrix) or isinstance(adata.X, csr_matrix):
+            feat = adata.X.toarray()
+        else:
+            feat = adata.X
+        coor = pd.DataFrame(feat)
+        coor.index = adata.obs.index
+        coor.columns = adata.var_names
+
+    n_nbrs = k_cutoff+1 if k_cutoff+1<coor.shape[0] else coor.shape[0]
+    nbrs = sklearn.neighbors.NearestNeighbors(n_neighbors=n_nbrs).fit(coor)
     distances, indices = nbrs.kneighbors(coor)
     KNN_list = []
     for it in range(indices.shape[0]):
@@ -184,20 +276,36 @@ def Cal_Expression_Net(adata, k_cutoff=6):
     exp_Net['Cell1'] = exp_Net['Cell1'].map(id_cell_trans)
     exp_Net['Cell2'] = exp_Net['Cell2'].map(id_cell_trans)
 
+    if verbose:
+        print('Expression graph contains %d edges, %d cells.' %(exp_Net.shape[0], adata.n_obs))
+        print('%.4f neighbors per cell on average.' %(exp_Net.shape[0]/adata.n_obs))
+
     adata.uns['Exp_Net'] = exp_Net
+    
+
+def cal_metagene(adata,gene_list,obs_name='metagene',layer=None):
+
+    # 提取感兴趣基因的表达矩阵
+    if layer is not None:
+        gene_expressions = adata[:, gene_list].layers[layer]
+    else:
+        gene_expressions = adata[:, gene_list].X
+
+    # 如果是稀疏矩阵，则转换为密集矩阵
+    if sp.issparse(gene_expressions):
+        gene_expressions = gene_expressions.toarray()
+
+    # 计算给定基因列表的表达值之和
+    metagene_expression = np.sum(gene_expressions, axis=1)
+
+    # 将新的 metagene 添加到 anndata 对象中
+    adata.obs[obs_name] = metagene_expression
 
 
-def res_search_fixed_clus(adata, fixed_clus_count, increment=0.02):
-    '''
-        arg1(adata)[AnnData matrix]
-        arg2(fixed_clus_count)[int]
-        
-        return:
-            resolution[int]
-    '''
-    for res in np.arange(2.5, 0.0, -increment):
-        sc.tl.leiden(adata, random_state=0, resolution=res)
-        count_unique_leiden = len(pd.DataFrame(adata.obs['leiden']).leiden.unique())
+def res_search_fixed_clus(adata, fixed_clus_count, max_res=2.5, min_res=0, increment=0.02, key_added='RGAST'):
+    for res in np.arange(max_res, min_res, -increment):
+        sc.tl.leiden(adata, random_state=2024, resolution=res,key_added=key_added)
+        count_unique_leiden = len(adata.obs[key_added].unique())
         if count_unique_leiden <= fixed_clus_count:
             break
     return res
@@ -313,3 +421,32 @@ def Stats_Spatial_Net(adata):
     plt.xlabel('')
     plt.title('Number of Neighbors (Mean=%.2f)'%Mean_edge)
     ax.bar(plot_df.index, plot_df)
+
+
+@silence_output
+def mclust_R(adata, num_cluster, modelNames='EEE', used_obsm=None, random_seed=2020):
+    """\
+    Clustering using the mclust algorithm.
+    The parameters are the same as those in the R package mclust.
+    """
+    
+    np.random.seed(random_seed)
+    import rpy2.robjects as robjects
+    robjects.r.library("mclust")
+
+    import rpy2.robjects.numpy2ri
+    rpy2.robjects.numpy2ri.activate()
+    r_random_seed = robjects.r['set.seed']
+    r_random_seed(random_seed)
+    rmclust = robjects.r['Mclust']
+
+    if used_obsm is None:
+        res = rmclust(rpy2.robjects.numpy2ri.numpy2rpy(np.array(adata.X)), num_cluster, modelNames)
+    else:
+        res = rmclust(rpy2.robjects.numpy2ri.numpy2rpy(adata.obsm[used_obsm]), num_cluster, modelNames)
+    mclust_res = np.array(res[-2])
+
+    adata.obs['mclust'] = mclust_res
+    adata.obs['mclust'] = adata.obs['mclust'].astype('int')
+    adata.obs['mclust'] = adata.obs['mclust'].astype('category')
+       
