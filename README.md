@@ -4,7 +4,7 @@ RGAST: Relational Graph Attention Network for Spatial Transcriptome Analysis [[p
 
 This document will help you easily go through the RGAST model.
 
-![fig1_00](https://github.com/GYQ-form/RGAST/assets/79566479/fe0655dc-2318-44e0-92bf-0aea3aad7163)
+![fig1](https://github.com/user-attachments/assets/34f8dcb6-6c51-4247-9a48-51b6afb04bd8)
 
 ## Dependencies
 
@@ -28,14 +28,6 @@ To install our package, run
 git clone https://github.com/GYQ-form/RGAST.git
 cd RGAST
 pip install .
-```
-
-You can also clone the repo and install it in editable mode:
-
-```bash
-git clone https://github.com/GYQ-form/RGAST.git
-cd RGAST
-pip install -e .
 ```
 
 ## Usage
