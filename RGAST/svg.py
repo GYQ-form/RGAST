@@ -96,7 +96,7 @@ def rank_genes_groups(input_adata, target_cluster,nbr_list, label_col, adj_nbr=T
     pvals_adj=[i[0] for i in adata.uns['rank_genes_groups']["pvals_adj"]]
     genes=[i[1] for i in adata.uns['rank_genes_groups']["names"]]
     if issparse(adata.X):
-        obs_tidy=pd.DataFrame(adata.X.A)
+        obs_tidy=pd.DataFrame(adata.X.toarray())
     else:
         obs_tidy=pd.DataFrame(adata.X)
     obs_tidy.index=adata.obs["target"].tolist()

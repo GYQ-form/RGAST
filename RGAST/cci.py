@@ -10,12 +10,12 @@ from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import normalize
 from scipy.stats import norm
 from scipy.spatial.distance import pdist, squareform
-from matplotlib.patches import FancyArrowPatch
+from matplotlib.lines import Line2D 
 import matplotlib as mpl
 
 def attention_to_interact(adata, attention_key='att2', cum_att_threshold=0.5):
     n_spots = adata.shape[0]
-    interact_mat = np.zeros((n_spots,n_spots))
+    interact_mat = np.zeros((n_spots,n_spots),dtype=np.int8)
     weighted_mat = np.zeros((n_spots,n_spots))
     attention = adata.uns[attention_key]
 
@@ -402,9 +402,9 @@ def plot_cell_signaling(X,
         plt.savefig(filename, dpi=500, bbox_inches = 'tight', transparent=True)
 
 
-def plot_cell_adj(coord, cell_type, adj, filename=None, cmap=None, cell_size=25):
+def plot_cell_adj(coord, cell_type, adj, filename=None, cmap=None, cell_size=25, connection_alpha=0.5):
     coord_r = coord.copy()
-    coord_r[:,1] = -coord_r[:,1]
+    # coord_r[:,1] = -coord_r[:,1]
     # Create a figure and axis
     fig, ax = plt.subplots()
 
@@ -420,19 +420,16 @@ def plot_cell_adj(coord, cell_type, adj, filename=None, cmap=None, cell_size=25)
         for j in range(len(adj)):
             if adj[i, j] > 0:  # Check if there is a connection
                 line_width = adj[i, j]  # Use adj value for line width
-                arrow = FancyArrowPatch((coord_r[i, 0], coord_r[i, 1]),
-                                        (coord_r[j, 0], coord_r[j, 1]),
-                                        color='black',
-                                        linewidth=line_width,
-                                        arrowstyle='->',  # Use a simple arrow style
-                                        mutation_scale=10,  # Scale of the arrowhead
-                                        alpha=0.5,
-                                        facecolor='none')  # Make the arrowhead empty
-                ax.add_patch(arrow)
+                line = Line2D(
+                    [coord_r[i, 0], coord_r[j, 0]],  # x坐标
+                    [coord_r[i, 1], coord_r[j, 1]],  # y坐标
+                    color='black',
+                    linewidth=line_width,
+                    alpha=connection_alpha,
+                )
+                ax.add_line(line)
 
     # # Create legend
-    # legend_labels = np.unique(cell_type)
-    # legend_handles = scatter_handles[:len(legend_labels)]
     ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), ncol=1)
 
     # Remove axis border
@@ -455,7 +452,7 @@ def calculate_connection_matrix(adj, cell_type_label):
     num_types = len(unique_cell_types)
 
     # 创建连接数矩阵
-    connection_matrix = np.zeros((num_types, num_types), dtype=int)
+    connection_matrix = np.zeros((num_types, num_types), dtype=float)
 
     # 创建细胞类型到索引的映射字典
     type_to_index = {cell_type: index for index, cell_type in enumerate(unique_cell_types)}
@@ -466,11 +463,11 @@ def calculate_connection_matrix(adj, cell_type_label):
         cell_type = cell_types[i]
 
         # 找到与该细胞相连的细胞的类型
-        connected_cell_types = cell_types[np.where(adj[i] == 1)]
+        connected_idx = np.where(adj[i] > 0)[0]
 
         # 统计连接数
-        for j in connected_cell_types:
-            connection_matrix[type_to_index[cell_type], type_to_index[j]] += 1
+        for j in connected_idx:
+            connection_matrix[type_to_index[cell_type], type_to_index[cell_types[j]]] += adj[i][j]
 
     # 创建连接数矩阵的数据框
     connection_df = pd.DataFrame(connection_matrix, index=unique_cell_types, columns=unique_cell_types)
@@ -593,3 +590,23 @@ def classify_range2(coord, adj, devide_q=50):
     adj_long[np.where(dist_matrix<=cutoff)] = 0
 
     return adj_short, adj_long
+
+
+def celltype_adj(used_ct, adj, all_cts):
+
+    cell_types = np.array(all_cts)
+    remove_idx = np.where(cell_types!=used_ct)[0]
+    ct_adj = adj.copy()
+    ct_adj[np.ix_(remove_idx, remove_idx)] = 0
+
+    return ct_adj
+
+
+def random_edge(adj, frac=0.001):
+
+    edge_idx = np.where(adj==1)
+    fill = np.random.choice([0,1],size=edge_idx[0].shape,replace=True,p=[1-frac,frac])
+    select_adj = adj.copy()
+    select_adj[edge_idx] = fill
+
+    return select_adj
