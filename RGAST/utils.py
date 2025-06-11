@@ -12,6 +12,8 @@ from torch_geometric.data import Data
 import contextlib
 import io
 import warnings
+import anndata
+from typing import List, Literal
 
 def silence_output(func):
     def wrapper(*args, **kwargs):
@@ -392,22 +394,158 @@ def Cal_Spatial_Net_3D(adata, rad_cutoff_2D, rad_cutoff_Zaxis,
             (adata.uns['Spatial_Net'].shape[0]/adata.n_obs))
 
 
-def Cal_Expression_3D(adata, k_cutoff=6, key_section='Section_id', verbose=True):
+def Cal_Spatial_Net_Multiple(adata, key_section='Section_id', 
+                             rad_cutoff=None, k_cutoff=6, model='KNN', verbose=True):
+    """
+    Calculates the spatial network for each section within a larger AnnData object independently
+    and combines them into a single network.
 
-    adata.uns['Exp_Net'] = pd.DataFrame()
-    for temp_section in np.unique(adata.obs[key_section]):
+    This function does NOT compute inter-section (cross-section) connections.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing data from multiple sections.
+    key_section
+        The column name in `adata.obs` that identifies the section for each cell.
+    rad_cutoff
+        Radius cutoff when model='Radius'. Passed to Cal_Spatial_Net.
+    k_cutoff
+        The number of nearest neighbors when model='KNN'. Passed to Cal_Spatial_Net.
+    model
+        The network construction model ('Radius' or 'KNN'). Passed to Cal_Spatial_Net.
+    verbose
+        If True, print progress information.
+    
+    Returns
+    -------
+    The combined intra-section spatial network is saved in adata.uns['Spatial_Net'].
+    """
+    if verbose:
+        print(f'Calculating intra-section spatial networks using model: {model}')
+
+    all_section_nets = []
+    
+    # Iterate over each unique section ID
+    for section_id in np.unique(adata.obs[key_section]):
         if verbose:
-            print('------Calculating Expression Network of section ', temp_section)
-        temp_adata = adata[adata.obs[key_section] == temp_section, ].copy()
-        sc.pp.filter_genes(temp_adata, min_cells=5)
-        sc.pp.normalize_total(temp_adata, target_sum=1, exclude_highly_expressed=True)
-        sc.pp.scale(temp_adata)
-        sc.pp.pca(temp_adata, n_comps=100)
-        Cal_Expression_Net(
-            temp_adata, k_cutoff=k_cutoff)
-        temp_adata.uns['Exp_Net']['SNN'] = temp_section
-        adata.uns['Exp_Net'] = pd.concat(
-            [adata.uns['Exp_Net'], temp_adata.uns['Exp_Net']])
+            print(f'------ Processing section: {section_id}')
+        
+        # Create a temporary AnnData object for the current section
+        # Use .copy() to avoid SettingWithCopyWarning
+        temp_adata = adata[adata.obs[key_section] == section_id, ].copy()
+        
+        # Calculate the spatial network for this single section
+        Cal_Spatial_Net(temp_adata, rad_cutoff=rad_cutoff, k_cutoff=k_cutoff, 
+                        model=model, verbose=False) # Inner call is not verbose
+        
+        # Add a column to identify which section the edges belong to
+        if 'Spatial_Net' in temp_adata.uns and not temp_adata.uns['Spatial_Net'].empty:
+            section_net = temp_adata.uns['Spatial_Net']
+            section_net['Section'] = section_id
+            all_section_nets.append(section_net)
+
+    if not all_section_nets:
+        print("Warning: No spatial networks were generated. The result is empty.")
+        adata.uns['Spatial_Net'] = pd.DataFrame()
+        return
+
+    # Combine all individual networks into one final DataFrame
+    final_net = pd.concat(all_section_nets, ignore_index=True)
+    adata.uns['Spatial_Net'] = final_net
+    
+    if verbose:
+        num_total_edges = adata.uns['Spatial_Net'].shape[0]
+        print('\n------ Combined Spatial Network Summary ------')
+        print('Combined graph contains %d total edges, for %d cells.' % (num_total_edges, adata.n_obs))
+        print('%.4f neighbors per cell on average.' % (num_total_edges / adata.n_obs))
+
+
+def Cal_Expression_Net_Multiple(adata, k_cutoff=6, key_section='Section_id', inter_slice_knn=True, verbose=True):
+    """
+    Construct the expression similarity networks from multiple slices.
+
+    Can compute networks within each slice independently or globally across all slices.
+
+    Parameters
+    ----------
+    adata
+        AnnData object of scanpy package, containing multiple sections.
+    k_cutoff
+        The number of nearest neighbors for KNN graph.
+    key_section
+        The column name of section_ID in adata.obs.
+    inter_slice_knn
+        If True, computes a single KNN graph on all cells from all slices together
+        after global PCA, creating inter-slice connections.
+        If False (default), computes a separate KNN graph for each slice independently
+        and concatenates them.
+    verbose
+        If True, print progress information.
+    
+    Returns
+    -------
+    The expression similarity network is saved in adata.uns['Exp_Net'].
+    """
+    if inter_slice_knn:
+        # --- Global Mode: Calculate KNN across all slices ---
+        if verbose:
+            print('------Calculating Expression Network globally across all sections...')
+        
+        # It's better to work on a copy for preprocessing
+        temp_adata = adata.copy()
+
+        # Calculate expression network on the whole preprocessed data
+        # This will naturally find neighbors across different sections
+        Cal_Expression_Net(temp_adata, k_cutoff=k_cutoff, dim_reduce='PCA', verbose=False)
+        
+        # Store the final result back into the original adata object
+        adata.uns['Exp_Net'] = temp_adata.uns['Exp_Net']
+        
+        if verbose:
+            net_df = adata.uns['Exp_Net']
+            
+            # Create a map from cell ID to section ID to identify inter-section edges
+            cell_to_section_map = adata.obs[key_section].to_dict()
+            
+            # Map section IDs to Cell1 and Cell2 columns
+            section1_col = net_df['Cell1'].map(cell_to_section_map)
+            section2_col = net_df['Cell2'].map(cell_to_section_map)
+            
+            # An edge is inter-section if the section IDs of its two cells are different
+            num_inter_slice_edges = (section1_col != section2_col).sum()
+            num_total_edges = net_df.shape[0]
+
+            print('------ Global Expression Network Summary ------')
+            print('Global expression graph contains %d total edges, for %d cells.' % (num_total_edges, adata.n_obs))
+            print('Of these, %d edges are inter-section (cross-section) connections.' % num_inter_slice_edges)
+            print('The remaining %d edges are intra-section connections.' % (num_total_edges - num_inter_slice_edges))
+            print('%.4f neighbors per cell on average.' % (num_total_edges / adata.n_obs))
+
+    else:
+        # --- Slice-by-slice Mode: Original behavior ---
+        if verbose:
+            print('------Calculating Expression Network for each section independently...')
+            
+        adata.uns['Exp_Net'] = pd.DataFrame()
+        
+        for temp_section in np.unique(adata.obs[key_section]):
+            if verbose:
+                print(f'------Processing section: {temp_section}')
+            
+            # Create a copy for independent preprocessing
+            temp_adata = adata[adata.obs[key_section] == temp_section, ].copy()
+            
+            # Calculate the expression network for this slice only
+            Cal_Expression_Net(temp_adata, k_cutoff=k_cutoff, dim_reduce='PCA', verbose=False)
+            
+            # Add section info and concatenate
+            temp_adata.uns['Exp_Net']['SNN'] = temp_section
+            adata.uns['Exp_Net'] = pd.concat([adata.uns['Exp_Net'], temp_adata.uns['Exp_Net']])
+
+        if verbose:
+            print('Combined expression graph contains %d edges, %d cells.' % (adata.uns['Exp_Net'].shape[0], adata.n_obs))
+            print('%.4f neighbors per cell on average.' % (adata.uns['Exp_Net'].shape[0] / adata.n_obs))
 
 
 def Stats_Spatial_Net(adata):
@@ -423,30 +561,87 @@ def Stats_Spatial_Net(adata):
     ax.bar(plot_df.index, plot_df)
 
 
-@silence_output
-def mclust_R(adata, num_cluster, modelNames='EEE', used_obsm=None, random_seed=2020):
-    """\
-    Clustering using the mclust algorithm.
-    The parameters are the same as those in the R package mclust.
+def stitch_spatial_anndatas(
+    adatas: List[anndata.AnnData],
+    spatial_key: str = 'spatial',
+    mode: Literal['horizontal', 'vertical'] = 'horizontal',
+    gap: float = 5.0
+) -> anndata.AnnData:
     """
+    Stitches multiple spatial AnnData objects by adjusting their spatial coordinates.
+
+    This generalized function works for any spatial transcriptomics data type that
+    stores coordinates in `adata.obsm`.
+
+    Args:
+        adatas: A list of AnnData objects to be stitched. Each object must contain
+                spatial coordinates in `adata.obsm`.
+        spatial_key: The key in `adata.obsm` where the spatial coordinates are stored.
+                     Defaults to 'spatial'.
+        mode: The stitching direction, either 'horizontal' (side-by-side) or
+              'vertical' (top-to-bottom).
+        gap: The gap to insert between adjacent sections, in coordinate units.
+
+    Returns:
+        A new AnnData object containing the merged data and stitched coordinates.
+    """
+    # --- 1. Input validation ---
+    if not isinstance(adatas, list) or len(adatas) < 1:
+        raise ValueError("Input must be a list containing at least one AnnData object.")
+
+    # Check if all AnnData objects have the required spatial key
+    for i, adata in enumerate(adatas):
+        if spatial_key not in adata.obsm:
+            raise KeyError(f"Input AnnData object at index {i} is missing the spatial key '{spatial_key}' in .obsm")
+
+    if len(adatas) == 1:
+        print("Warning: Input list contains only one AnnData object. No stitching is needed. Returning a copy.")
+        return adatas[0].copy()
+
+    # --- 2. Concatenate all AnnData objects ---
+    # The 'batch' column created here will be our guide for stitching.
+    # The 'uns' dictionaries are merged using a 'unique' strategy.
+    adata_merged = anndata.concat(
+        adatas,
+        join='outer',
+        merge='unique',
+        uns_merge='unique',
+        label='batch',
+        index_unique='-'
+    )
+
+    # Check the dtype of the spatial coordinates array.
+    if not np.issubdtype(adata_merged.obsm[spatial_key].dtype, np.floating):
+        adata_merged.obsm[spatial_key] = adata_merged.obsm[spatial_key].astype(np.float64)
+
+    # --- 3. Iteratively adjust spatial coordinates ---
+    batch_categories = adata_merged.obs['batch'].cat.categories
+
+    # Loop starting from the second object (index=1)
+    for i in range(1, len(batch_categories)):
+        # Get boolean masks for the previous and current batches
+        is_prev_batch = adata_merged.obs['batch'] == batch_categories[i-1]
+        is_curr_batch = adata_merged.obs['batch'] == batch_categories[i]
+        
+        # Get coordinates from the specified spatial_key
+        coords_prev = adata_merged.obsm[spatial_key][is_prev_batch]
+        coords_curr = adata_merged.obsm[spatial_key][is_curr_batch]
+        
+        # Calculate the shift needed to place the current object next to the previous one
+        if mode == 'horizontal':
+            shift = coords_prev[:, 0].max() - coords_curr[:, 0].min() + gap
+            adata_merged.obsm[spatial_key][is_curr_batch, 0] += shift
+            
+        elif mode == 'vertical':
+            shift = coords_prev[:, 1].max() - coords_curr[:, 1].min() + gap
+            adata_merged.obsm[spatial_key][is_curr_batch, 1] += shift
+        
+        else:
+            raise ValueError(f"Invalid mode '{mode}'. Choose 'horizontal' or 'vertical'.")
+
+    print(f"Successfully stitched {len(adatas)} AnnData objects.")
+    print(f"Using spatial key: 'obsm/{spatial_key}'")
+    print(f"Mode: '{mode}', Gap: {gap}")
+    print(f"Final object dimensions: {adata_merged.shape}")
     
-    np.random.seed(random_seed)
-    import rpy2.robjects as robjects
-    robjects.r.library("mclust")
-
-    import rpy2.robjects.numpy2ri
-    rpy2.robjects.numpy2ri.activate()
-    r_random_seed = robjects.r['set.seed']
-    r_random_seed(random_seed)
-    rmclust = robjects.r['Mclust']
-
-    if used_obsm is None:
-        res = rmclust(rpy2.robjects.numpy2ri.numpy2rpy(np.array(adata.X)), num_cluster, modelNames)
-    else:
-        res = rmclust(rpy2.robjects.numpy2ri.numpy2rpy(adata.obsm[used_obsm]), num_cluster, modelNames)
-    mclust_res = np.array(res[-2])
-
-    adata.obs['mclust'] = mclust_res
-    adata.obs['mclust'] = adata.obs['mclust'].astype('int')
-    adata.obs['mclust'] = adata.obs['mclust'].astype('category')
-       
+    return adata_merged
