@@ -12,6 +12,65 @@ from scipy.stats import norm
 from scipy.spatial.distance import pdist, squareform
 from matplotlib.lines import Line2D 
 import matplotlib as mpl
+import scipy.sparse as sp
+import pkgutil
+import io
+from tqdm import tqdm
+import scipy
+from matplotlib.collections import LineCollection
+
+
+def ligand_receptor_database(
+    database = "CellChat",
+    species = "mouse",
+    heteromeric_delimiter = "_",
+    signaling_type = "Secreted Signaling" # or "Cell-Cell contact" or "ECM-Receptor" or None
+):
+    """
+    Extract ligand-receptor pairs from LR database.
+
+    Parameters
+    ----------
+    database
+        The name of the ligand-receptor database. Use 'CellChat' for CellChatDB [Jin2021]_ of 'CellPhoneDB_v4.0' for CellPhoneDB_v4.0 [Efremova2020]_.
+    species
+        The species of the ligand-receptor pairs. Choose between 'mouse' and 'human'.
+    heteromeric_delimiter
+        The character to separate the heteromeric units of heteromeric ligands and receptors. 
+        For example, if the heteromeric receptor (TGFbR1, TGFbR2) will be represented as 'TGFbR1_TGFbR2' if this parameter is set to '_'.
+    signaling_type
+        The type of signaling. Choose from 'Secreted Signaling', 'Cell-Cell Contact', and 'ECM-Receptor' for CellChatDB or 'Secreted Signaling' and 'Cell-Cell Contact' for CellPhoneDB_v4.0. 
+        If None, all pairs in the database are returned.
+
+    Returns
+    -------
+    df_ligrec : pandas.DataFrame
+        A pandas DataFrame of the LR pairs with the three columns representing the ligand, receptor, and the signaling pathway name, respectively.
+
+    References
+    ----------
+
+    .. [Jin2021] Jin, S., Guerrero-Juarez, C. F., Zhang, L., Chang, I., Ramos, R., Kuan, C. H., ... & Nie, Q. (2021). 
+        Inference and analysis of cell-cell communication using CellChat. Nature communications, 12(1), 1-20.
+    .. [Efremova2020] Efremova, M., Vento-Tormo, M., Teichmann, S. A., & Vento-Tormo, R. (2020). 
+        CellPhoneDB: inferring cell–cell communication from combined expression of multi-subunit ligand–receptor complexes. Nature protocols, 15(4), 1484-1506.
+
+    """
+
+    if database == "CellChat":
+        data = pkgutil.get_data(__name__, "_data/LRdatabase/CellChat/CellChatDB.ligrec."+species+".csv")
+        df_ligrec = pd.read_csv(io.BytesIO(data), index_col=0)
+        if not signaling_type is None:
+            df_ligrec = df_ligrec[df_ligrec.iloc[:,3] == signaling_type]
+    elif database == 'CellPhoneDB_v4.0':
+        data = pkgutil.get_data(__name__, "_data/LRdatabase/CellPhoneDB_v4.0/CellPhoneDBv4.0."+species+".csv")
+        df_ligrec = pd.read_csv(io.BytesIO(data), index_col=0)
+        if not signaling_type is None:
+            df_ligrec = df_ligrec[df_ligrec.iloc[:,3] == signaling_type]
+    
+    df_ligrec.columns = ['ligand', 'receptor', 'pathway', 'signaling_type']
+    return df_ligrec
+
 
 def attention_to_interact(adata, attention_key='att2', cum_att_threshold=0.5):
     n_spots = adata.shape[0]
@@ -42,6 +101,291 @@ def attention_to_interact(adata, attention_key='att2', cum_att_threshold=0.5):
 
     adata.obsp['interact_mat'] = interact_mat
     adata.obsp['weighted_mat'] = weighted_mat
+    adata.obsp['interact_mat_directed'] = (weighted_mat>0).astype(np.int8)
+
+
+def attention_to_interact2(adata, attention_key='att2', att_score_threshold=0.3):
+    """
+    根据设定的注意力分数阈值，构建空间spot之间的交互网络。
+
+    这个函数会处理一个图注意力网络中的注意力分数，并保留所有注意力分数
+    高于指定阈值的边，从而生成一个二进制的交互矩阵和一个加权的交互矩阵。
+
+    参数:
+    ----------
+    adata: AnnData
+        包含空间转录组数据的AnnData对象。
+        `adata.uns[attention_key]` 应包含注意力数据。
+        注意力数据的格式应为一个元组 `(edge_index, edge_weight)`，其中
+        `edge_index` 是一个 `[2, n_edges]` 的数组，代表边的连接关系 (源 -> 目标)，
+        `edge_weight` 是一个 `[n_edges]` 的数组，代表每条边的注意力分数。
+        
+    attention_key: str, optional (default='att2')
+        在 `adata.uns` 中存储注意力分数的键名。
+        
+    att_score_threshold: float, optional (default=0.1)
+        用于筛选边的注意力分数阈值。只有当一个spot到另一个spot的
+        （累加后）注意力分数大于此阈值时，这条边才会被保留。
+
+    返回值:
+    -------
+    None
+        函数会直接修改输入的 `adata` 对象，在 `adata.obsp` 中添加两个稀疏矩阵：
+        - 'interact_mat': 二进制交互矩阵，1表示两个spot间存在高于阈值的交互。这是一个对称矩阵。
+        - 'weighted_mat': 加权交互矩阵，存储了从源spot到目标spot的有向注意力分数。这是一个非对称矩阵。
+    """
+    n_spots = adata.shape[0]
+    
+    interact_row, interact_col = [], []
+    weighted_row, weighted_col, weighted_data = [], [], []
+
+    attention = adata.uns[attention_key]
+    source_nodes, target_nodes = attention[0][0], attention[0][1]
+    edge_weights = attention[1]
+
+    for i in np.arange(n_spots):
+        idx = np.where(target_nodes == i)[0]
+        
+        if len(idx) == 0:
+            continue
+            
+        from_idx = source_nodes[idx]
+        att_score = edge_weights[idx].flatten()
+        
+        unique_from_idx, inverse_indices = np.unique(from_idx, return_inverse=True)
+        summed_att_score = np.zeros(unique_from_idx.shape[0], dtype=np.float32)
+        
+        # 此行现在可以安全执行
+        np.add.at(summed_att_score, inverse_indices, att_score)
+        
+        selected_indices = np.where(summed_att_score > att_score_threshold)[0]
+        
+        if len(selected_indices) == 0:
+            continue
+
+        used_from_idx = unique_from_idx[selected_indices]
+        used_att = summed_att_score[selected_indices]
+        
+        weighted_row.extend(used_from_idx)
+        weighted_col.extend([i] * len(used_from_idx))
+        weighted_data.extend(used_att)
+        
+        interact_row.extend(used_from_idx)
+        interact_col.extend([i] * len(used_from_idx))
+        interact_row.extend([i] * len(used_from_idx))
+        interact_col.extend(used_from_idx)
+
+    # --- 构建并存储稀疏矩阵 ---
+    weighted_mat = sp.coo_matrix((weighted_data, (weighted_row, weighted_col)), shape=(n_spots, n_spots)).tocsr()
+    
+    # ==================== (鲁棒性) ====================
+    # 增加判断，防止在没有符合条件的边时，因解压空集合而报错。
+    if interact_row:
+        unique_edges = set(zip(interact_row, interact_col))
+        final_interact_row, final_interact_col = zip(*unique_edges)
+        interact_data = np.ones(len(final_interact_row))
+    else:
+        final_interact_row, final_interact_col, interact_data = [], [], []
+    # =======================================================
+
+    interact_mat = sp.coo_matrix((interact_data, (final_interact_row, final_interact_col)), shape=(n_spots, n_spots)).tocsr()
+    
+    adata.obsp['interact_mat'] = interact_mat
+    adata.obsp['weighted_mat'] = weighted_mat
+
+
+def analyze_communication_mechanism(adata: anndata.AnnData, lr_df: pd.DataFrame, adj_matrix: np.ndarray):
+    """
+    基于已知的细胞通讯网络，量化每个L-R对和通路的贡献。
+
+    Args:
+        adata: 已标准化的 AnnData 对象。
+        lr_df: 配体-受体数据库 DataFrame。
+        adj_matrix: n_obs x n_obs 的0-1邻接矩阵，表示细胞通讯网络。
+    """
+    print("\n--- Starting Communication Mechanism Analysis ---")
+    n_obs = adata.n_obs
+    
+    # --- 1. 数据准备 ---
+    if adj_matrix.shape != (n_obs, n_obs):
+        raise ValueError(f"Shape of adj_matrix {adj_matrix.shape} does not match adata.n_obs {n_obs}.")
+
+    # 解析L-R数据库
+    lr_df_proc = lr_df.copy()
+    lr_df_proc['ligand_subunits'] = lr_df_proc['ligand'].str.split('_')
+    lr_df_proc['receptor_subunits'] = lr_df_proc['receptor'].str.split('_')
+    
+    # 过滤L-R数据库
+    all_genes_in_adata = set(adata.var_names)
+    def check_presence(row):
+        genes = row['ligand_subunits'] + row['receptor_subunits']
+        return all(g in all_genes_in_adata for g in genes)
+    
+    lr_df_proc = lr_df_proc[lr_df_proc.apply(check_presence, axis=1)].reset_index(drop=True)
+    print(f"Found {len(lr_df_proc)} L-R pairs with all subunits present in the data.")
+    
+    # 初始化通路聚合器
+    pathway_names = lr_df_proc['pathway'].unique()
+    pathway_aggregators = {name: np.zeros((n_obs, n_obs)) for name in pathway_names}
+    pathway_counters = {name: 0 for name in pathway_names}
+        
+    # --- 2. 核心计算 ---
+    # 确保adata.X是numpy数组以便索引
+    X_matrix = adata.X.toarray() if hasattr(adata.X, 'toarray') else adata.X
+
+    for _, row in tqdm(lr_df_proc.iterrows(), total=len(lr_df_proc), desc="Processing L-R pairs"):
+        ligand_subunits = row['ligand_subunits']
+        receptor_subunits = row['receptor_subunits']
+        pathway = row['pathway']
+        
+        # 获取亚基在var中的索引
+        ligand_indices = [adata.var_names.get_loc(g) for g in ligand_subunits]
+        receptor_indices = [adata.var_names.get_loc(g) for g in receptor_subunits]
+
+        # 计算每个细胞的平均表达 (axis=1)
+        L_expr_per_cell = X_matrix[:, ligand_indices].mean(axis=1)
+        R_expr_per_cell = X_matrix[:, receptor_indices].mean(axis=1)
+        
+        # 计算方向性分数
+        score_i_sends_j = np.outer(L_expr_per_cell, R_expr_per_cell)
+        
+        # 合并双向分数 (i->j 和 j->i)
+        # score_j_sends_i is score_i_sends_j.T
+        # total_lr_score = score_i_sends_j + score_i_sends_j.T
+        
+        # 关键步骤：使用邻接矩阵进行屏蔽
+        masked_lr_score = score_i_sends_j * adj_matrix
+        
+        # 如果分数矩阵全为0，则不保存，跳过
+        if np.all(masked_lr_score == 0):
+            continue
+            
+        # 存储L-R对的结果 (使用稀疏矩阵节省内存)
+        lr_key = f"LR_{row['ligand']}_{row['receptor']}"
+        adata.obsp[lr_key] = scipy.sparse.csr_matrix(masked_lr_score)
+        
+        # --- 3. 累加到通路聚合器 ---
+        pathway_aggregators[pathway] += masked_lr_score
+        pathway_counters[pathway] += 1
+        
+    # 存储最终的通路聚合结果
+    print("\nStoring aggregated pathway scores...")
+    for pathway, agg_matrix in pathway_aggregators.items():
+        if np.all(agg_matrix == 0):
+            continue
+        pathway_key = f"pathway_{pathway}"
+        agg_matrix = agg_matrix / pathway_counters[pathway] if pathway_counters[pathway] > 0 else agg_matrix
+        adata.obsp[pathway_key] = scipy.sparse.csr_matrix(agg_matrix)
+
+    print("\n--- Analysis Finished ---")
+    print("Scores have been stored in adata.obsp")
+
+
+def calculate_pathway_scores(adata: anndata.AnnData) -> anndata.AnnData:
+    """
+    计算每个通路的全局分数并将其存储在 adata.uns 中。
+    分数计算方法为：提取通路矩阵中所有非零值的平均值。
+
+    Args:
+        adata: anndata 对象，其 .obsp 中包含键名以 'pathway_' 开头的稀疏矩阵。
+
+    Returns:
+        更新后的 anndata 对象。
+    """
+    print("--- Calculating pathway scores ---")
+    
+    if not hasattr(adata, 'obsp') or not adata.obsp:
+        raise ValueError("adata.obsp is empty. Please run 'RGAST.cci.analyze_communication_mechanism' first.")
+
+    pathway_scores = {}
+    
+    # 遍历 obsp 中的所有条目
+    for key, matrix in adata.obsp.items():
+        if key.startswith('pathway_'):
+            # 提取通路名称
+            pathway_name = key.replace('pathway_', '')
+            
+            if isinstance(matrix, sp.spmatrix) and hasattr(matrix, 'data'):
+                # .data 属性直接存储了所有的非零值
+                non_zero_values = matrix.data
+                
+                if len(non_zero_values) > 0:
+                    # 计算非零值的平均值
+                    score = np.mean(non_zero_values)
+                else:
+                    score = 0.0 # 如果没有非零值，分数为0
+            else:
+                score = matrix.mean()
+                    
+            pathway_scores[pathway_name] = score
+    
+    if not pathway_scores:
+        print("Warning: No pathway matrices found in adata.obsp (keys starting with 'pathway_').")
+        return adata
+        
+    # 将字典转换为 DataFrame
+    score_df = pd.DataFrame(list(pathway_scores.items()), columns=['pathway', 'score'])
+    
+    # 按分数从高到低排序
+    score_df = score_df.sort_values('score', ascending=False).reset_index(drop=True)
+    
+    # 将结果存储在 adata.uns 中
+    adata.uns['pathway_score'] = score_df
+    
+    print(f"Successfully calculated scores for {len(score_df)} pathways.")
+    print("Scores stored in adata.uns['pathway_score'].")
+
+
+def plot_pathway_scores(
+    adata: anndata.AnnData, 
+    top_n: int = None,
+    title: str = "Overall Pathway Communication Strength",
+    color: str = "#B19470",
+    filename: str = None
+):
+    """
+    使用条形图可视化通路分数。
+
+    Args:
+        adata: anndata 对象，其 .uns 中包含 'pathway_score' 键。
+        top_n (int, optional): 只显示分数最高的 top_n 个通路。默认为 None (显示全部)。
+        title (str, optional): 图像的标题。
+        palette (str, optional): seaborn调色板名称。
+        filename (str, optional): 如果提供，将图像保存到指定的文件名。
+    """
+    if 'pathway_score' not in adata.uns:
+        raise ValueError("Please run 'RGAST.cci.calculate_pathway_scores' first to compute pathway scores.")
+    score_df = adata.uns['pathway_score']
+
+    if top_n:
+        plot_data = score_df.head(top_n)
+    else:
+        plot_data = score_df
+
+    plt.figure(figsize=(8, max(6, len(plot_data) * 0.4))) # 图形高度自适应
+    
+    # 创建条形图，Seaborn会自动使用DataFrame的顺序
+    sns.barplot(x='score', y='pathway', data=plot_data, color=color)
+    
+    plt.tick_params(labelsize=16)  # 设置刻度标签大小
+    plt.title(title, fontsize=22, pad=20)
+    plt.xlabel("Mean Communication Score", fontsize=20)
+    plt.ylabel("Pathway", fontsize=20)
+    
+    # 移除右边和上边的边框，使图形更美观
+    sns.despine()
+    
+    # 自动调整布局防止标签被遮挡
+    plt.tight_layout()
+
+    # Save the plot to a file
+    if filename is not None:
+        plt.savefig(filename, bbox_inches='tight')
+    
+    plt.show()
+    plt.close()
+
+
 
 def ranked_partial(coord, size):  #size是list，[3,5]代表把总图切成宽3份(x)、高5份(y)的子图
     x_gap = (coord[:,0].max()-coord[:,0].min())/size[0]
@@ -73,6 +417,7 @@ def select_celltypes(cell_types, selected_ct, frac):
 
 def cal_communication_direction(
     adata: anndata.AnnData,
+    network_key: str = 'weighted_mat',
     k: int = 5,
     pos_idx: Optional[np.ndarray] = None,
 ):
@@ -84,6 +429,9 @@ def cal_communication_direction(
     adata
         The data matrix of shape ``n_obs`` x ``n_var``.
         Rows correspond to cells or spots and columns to genes.
+    network_key
+        The key in ``.obsp`` that contains the weighted directed interaction matrix.
+        Default to 'weighted_mat', which is generated by the function:`RGAST.cci.attention_to_interact`.
     k
         Top k senders or receivers to consider when determining the direction.
     pos_idx
@@ -101,7 +449,7 @@ def cal_communication_direction(
     if not pos_idx is None:
         pts = pts[:,pos_idx]
 
-    S_np = adata.obsp['weighted_mat']
+    S_np = adata.obsp[network_key].toarray() if hasattr(adata.obsp[network_key], 'toarray') else adata.obsp[network_key]
     sender_vf = np.zeros_like(pts)
     receiver_vf = np.zeros_like(pts)
 
@@ -401,6 +749,8 @@ def plot_cell_signaling(X,
     if not filename is None:
         plt.savefig(filename, dpi=500, bbox_inches = 'tight', transparent=True)
 
+    plt.show()
+
 
 def plot_cell_adj(coord, cell_type, adj, filename=None, cmap=None, cell_size=25, connection_alpha=0.5):
     coord_r = coord.copy()
@@ -443,6 +793,124 @@ def plot_cell_adj(coord, cell_type, adj, filename=None, cmap=None, cell_size=25,
     plt.close()
 
 
+def plot_cell_connections(
+    coord: np.ndarray,
+    cell_type: list,
+    adj: np.ndarray,
+    directed: bool = False,
+    sender: str = None,      # 新增参数
+    receiver: str = None,    # 新增参数
+    filename: str = None,
+    cmap: dict = None,
+    cell_size: int = 25,
+    connection_alpha: float = 0.5,
+    max_linewidth: float = 2.0,
+    other_cell_color: str = '#D3D3D3' # 其他细胞的灰色
+):
+    """
+    可视化细胞的空间位置及其通讯连接(支持聚焦于sender-receiver)。
+
+    Args:
+        coord (np.ndarray): 细胞坐标数组。
+        cell_type (list): 每个细胞的类型列表。
+        adj (np.ndarray): 邻接矩阵。
+        directed (bool, optional): 是否绘制有向箭头。
+        sender (str, optional): 指定的发送细胞类型。
+        receiver (str, optional): 指定的接收细胞类型。
+        filename (str, optional): 保存图像的文件路径。
+        cmap (dict, optional): 细胞类型的颜色映射。
+        cell_size (int, optional): 细胞点的大小。
+        connection_alpha (float, optional): 连接线的透明度。
+        max_linewidth (float, optional): 连接线的最大宽度。
+        other_cell_color (str, optional): 非sender/receiver细胞的颜色。
+    """
+    if hasattr(adj, "toarray"):
+        adj = adj.toarray()
+        
+    cell_type_array = np.array(cell_type)
+    fig, ax = plt.subplots(figsize=(8, 8), dpi=150)
+
+    # --- 1. 细胞点绘制逻辑 ---
+    focus_mode = sender is not None and receiver is not None
+    
+    if focus_mode:
+        # 聚焦模式：高亮sender/receiver，灰化其他细胞
+        colors = []
+        for ct in cell_type_array:
+            if ct == sender:
+                colors.append(cmap.get(sender, 'red')) # 如果cmap中没有，则用默认色
+            elif ct == receiver:
+                colors.append(cmap.get(receiver, 'blue'))
+            else:
+                colors.append(other_cell_color)
+        
+        sns.scatterplot(x=coord[:, 0], y=coord[:, 1], c=colors, edgecolor=None, linewidth=0.2, ax=ax, s=cell_size, zorder=2)
+        
+        # 创建自定义图例
+        legend_elements = [
+            Line2D([0], [0], marker='o', color='w', label=sender, markerfacecolor=cmap.get(sender, 'red'), markersize=10),
+            Line2D([0], [0], marker='o', color='w', label=receiver, markerfacecolor=cmap.get(receiver, 'blue'), markersize=10),
+            Line2D([0], [0], marker='o', color='w', label='Other', markerfacecolor=other_cell_color, markersize=10)
+        ]
+        ax.legend(handles=legend_elements, loc='center left', bbox_to_anchor=(1.02, 0.5), frameon=False)
+
+    else:
+        # 默认模式：绘制所有细胞类型
+        sns.scatterplot(x=coord[:, 0], y=coord[:, 1], hue=cell_type, palette=cmap, edgecolor=None, linewidth=0.2, ax=ax, s=cell_size, zorder=2)
+        ax.legend(loc='center left', bbox_to_anchor=(1.02, 0.5), frameon=False)
+
+    # --- 2. 连接绘制逻辑 ---
+    adj_to_plot = adj.copy()
+    if adj.max() > 0:
+        adj_to_plot = adj_to_plot / adj.max() * max_linewidth
+    
+    if focus_mode:
+        # 聚焦模式：过滤邻接矩阵，只保留 sender -> receiver 的连接
+        sender_indices = np.where(cell_type_array == sender)[0]
+        receiver_indices = np.where(cell_type_array == receiver)[0]
+        
+        mask = np.zeros_like(adj_to_plot)
+        
+        # 使用 np.ix_ 高效地创建掩码
+        if len(sender_indices) > 0 and len(receiver_indices) > 0:
+            mask[np.ix_(sender_indices, receiver_indices)] = 1
+            # 对于无向图，也考虑 receiver -> sender 的连接
+            if not directed:
+                mask[np.ix_(receiver_indices, sender_indices)] = 1
+        
+        adj_to_plot *= mask # 应用掩码
+
+    # --- 绘制连接（箭头或线段）---
+    if directed:
+        sources, targets = adj_to_plot.nonzero()
+        for i, j in zip(sources, targets):
+            start_pos, end_pos = coord[i], coord[j]
+            line_width = adj_to_plot[i, j]
+            ax.arrow(start_pos[0], start_pos[1], end_pos[0] - start_pos[0], end_pos[1] - start_pos[1],
+                     color='black', alpha=connection_alpha, linewidth=line_width,
+                     head_width=line_width * 2.5, head_length=line_width * 2.5,
+                     length_includes_head=True, zorder=1)
+    else:
+        sources, targets = np.triu(adj_to_plot, k=1).nonzero()
+        if len(sources) > 0:
+            segments = np.array([coord[sources], coord[targets]]).transpose(1, 0, 2)
+            linewidths = adj_to_plot[sources, targets]
+            lc = LineCollection(segments, linewidths=linewidths, colors='black', alpha=connection_alpha, zorder=1)
+            ax.add_collection(lc)
+
+    # --- 图形美化 ---
+    ax.set_aspect('equal', adjustable='box')
+    ax.axis('off')
+    if focus_mode:
+        ax.set_title(f"Connections from {sender} to {receiver}", fontsize=14)
+
+    if filename:
+        plt.savefig(filename, bbox_inches='tight', dpi=300)
+    
+    plt.show()
+    plt.close()
+
+
 def calculate_connection_matrix(adj, cell_type_label):
     # 将cell_type_label转换为一维数组
     cell_types = np.array(cell_type_label)
@@ -458,6 +926,7 @@ def calculate_connection_matrix(adj, cell_type_label):
     type_to_index = {cell_type: index for index, cell_type in enumerate(unique_cell_types)}
 
     # 遍历邻接矩阵的每一行
+    adj = adj.toarray() if hasattr(adj, 'toarray') else adj
     for i in range(adj.shape[0]):
         # 获取该细胞的类型
         cell_type = cell_types[i]
