@@ -4,7 +4,7 @@ RGAST: A Relational Graph Attention Network for Multi-Scale Cell-Cell Communicat
 
 This document will help you easily go through the RGAST model.
 
-![fig1](https://github.com/user-attachments/assets/d30c8ac1-9ce8-42b7-93d7-3cd6f2313ddf)
+![fig1](https://github.com/user-attachments/assets/585a8126-55a3-42a3-9e76-0c00597ccab4)
 
 
 ## Dependencies
