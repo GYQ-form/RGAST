@@ -223,7 +223,7 @@ class Train_RGAST:
                     optimizer.step()
         
         if early_stopping == True and os.path.exists(f'{save_path}/model.pth'):
-            model = torch.load(f'{save_path}/model.pth').to(self.device)
+            model = torch.load(f'{save_path}/model.pth',weights_only=False).to(self.device)
 
         with torch.no_grad():
             if self.batch_data:
