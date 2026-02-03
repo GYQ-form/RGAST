@@ -1,4 +1,5 @@
 # RGAST
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18463983.svg)](https://doi.org/10.5281/zenodo.18463983)
 
 RGAST: A Relational Graph Attention Network for Multi-Scale Cell-Cell Communication Inference from Spatial Transcriptomics [[paper]](https://doi.org/10.1101/2024.08.09.607420)
 
@@ -43,3 +44,7 @@ RGAST is a deep learning framework designed to infer multi-scale cell-cell commu
 ## Tutorial
 
 We have prepared several basic tutorials  in https://github.com/GYQ-form/RGAST/tree/main/tutorial. You can quickly hands on RGAST by going through these tutorials. 
+
+## Analysis
+
+To enhance the reproducibility of this study, we deposited all the custom code at [Zenodo repository](https://doi.org/10.5281/zenodo.18463983) for running RGAST used in the paper. A comprehensive README file has also been provided for easy using of these custom scripts.
