@@ -13,13 +13,13 @@ This document will help you easily go through the RGAST model.
 The required Python packages and versions tested in our study are:
 
 ```
-pytorch==2.4.1
-scanpy==1.10.3
-scikit-learn==1.5.2
-pyg==2.6.1
-scipy==1.14.1
-numpy==2.0.1
-pandas==2.2.3
+pytorch==2.8.0
+scanpy==1.11.5
+scikit-learn==1.7.2
+pyg==2.7.0
+scipy==1.17.0
+numpy==2.3.0
+pandas==2.3.3
 ```
 
 ## Installation
