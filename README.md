@@ -1,7 +1,7 @@
 # RGAST
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18463983.svg)](https://doi.org/10.5281/zenodo.18463983)
 
-RGAST: A Relational Graph Attention Network for Multi-Scale Cell-Cell Communication Inference from Spatial Transcriptomics [[paper]](https://doi.org/10.1101/2024.08.09.607420)
+RGAST: Relational Graph Attention Network for Diverse Spatial Transcriptome Analysis [[paper]](https://doi.org/10.1093/bib/bbag298)
 
 This document will help you easily go through the RGAST model.
 
@@ -48,3 +48,9 @@ We have prepared several basic tutorials  in https://github.com/GYQ-form/RGAST/t
 ## Analysis
 
 To enhance the reproducibility of this study, we deposited all the custom code at [Zenodo repository](https://doi.org/10.5281/zenodo.18463983) for running RGAST used in the paper. A comprehensive README file has also been provided for easy using of these custom scripts.
+
+## Reference
+
+If you find our work useful in your research or if you use parts of this code, please consider citing our [paper](https://doi.org/10.1093/bib/bbag298):
+
+Yuqiao Gong, Xin Yuan, Zhangsheng Yu, Empowering multifaceted analysis of spatial transcriptomics data with RGAST, *Briefings in Bioinformatics*, Volume 27, Issue 3, May 2026, bbag298, https://doi.org/10.1093/bib/bbag298
